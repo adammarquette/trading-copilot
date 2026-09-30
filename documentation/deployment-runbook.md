@@ -33,8 +33,11 @@ cloud environments still need creating, so nothing deploys today.
 | [Open items](#open-items) | you are picking up unfinished platform work |
 
 ## Platform
-- **Cloud (running):** [Railway](https://railway.com) — project **`soothing-illumination`**
-  (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`).
+- **Cloud (running):** [Railway](https://railway.com). Two projects: **`gentle-charm`**
+  (`6006560b-337d-45f8-911a-44c5ef8e9316`) holds the staging deploy, running since 2026-09-30 at
+  `trader-staging.marqspec.com` ([*Railway staging — `gentle-charm`*](#railway-staging--gentle-charm-gh1211-running-partly-verified),
+  gh#1211); the older **`soothing-illumination`** (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`) holds only a plain
+  Postgres 18 and no app, and the sections below still describe it.
 - **Cloud (AWS — withdrawn 2026-09-29, gh#1215):** the AWS plan ([ADR-0030](adr/0030-aws-deployment-topology.md)) is
   dropped; **Railway is the running cloud** and this runbook describes it. The AWS sections below are kept as
   history and are not a procedure to follow. The CDK app is still under [`infra/`](../infra/) until its removal is
@@ -53,7 +56,7 @@ cloud environments still need creating, so nothing deploys today.
   behaviors on a Timescale-enabled instance (locally: the compose `timescaledb-ha` image, which bundles both
   extensions).
 
-### Railway staging — `gentle-charm` (gh#1211; staged, **not yet applied**)
+### Railway staging — `gentle-charm` (gh#1211; running, partly verified)
 
 A second Railway project, created 2026-09-29, holds the staging deploy that replaces the withdrawn AWS plan
 ([ADR-0030](adr/0030-aws-deployment-topology.md), gh#1215). Its `staging` environment is **practice-only** (R-14):
@@ -65,35 +68,49 @@ A second Railway project, created 2026-09-29, holds the staging deploy that repl
 | Project · workspace | `gentle-charm` · `6006560b-337d-45f8-911a-44c5ef8e9316` · *Gauntlet Projects* |
 | `staging` environment | `63cb3d40-aca1-4c11-a143-ac4b0b8aac7d` (`production` also exists here and is **left empty**) |
 | `app` service | `7307119a-4776-49e9-b171-43acb9f2175a` — image `ghcr.io/adammarquette/trading-copilot:sha-ccd1260` (pinned; bump to a newer `:sha-<short>`, never a floating tag), port `8080`, healthcheck `/health` 120 s, restart `ALWAYS`, sleep off |
-| `db` service | `ebb0255e-14e1-49bf-a160-ac056cf3e976` — image `timescale/timescaledb-ha:pg17` (TimescaleDB + pgvector, as the local compose), restart `ALWAYS`, sleep off |
-| `db-data` volume | `46d6210c-78fc-4531-8200-4a1f012b3bce`, mounted at `/home/postgres/pgdata`; `PGDATA=/home/postgres/pgdata/data` so the cluster sits in a subdirectory of the mount |
+| `db` service | `ebb0255e-14e1-49bf-a160-ac056cf3e976` — image `timescale/timescaledb-ha:pg17` (as the local compose), restart `ALWAYS`, sleep off; **no public domain or TCP proxy** |
+| `db-data` volume | `46d6210c-78fc-4531-8200-4a1f012b3bce`, 5000 MB, mounted at `/home/postgres/pgdata`; `PGDATA=/home/postgres/pgdata/data` so the cluster sits in a subdirectory of the mount |
+| Region | `us-east4-eqdc4a`, one replica each (set in the dashboard; the agent had staged the default) |
+| Custom domain | `trader-staging.marqspec.com` on `app`, **target port `8080`** (id `cc6c1382-0a10-498f-80d7-5fe0bf5e7e9a`) |
 
-**State: staged in Railway's pending changes, not applied.** Nothing runs and nothing bills until the staged changes
-are committed (`accept-deploy`, or *Deploy* in the dashboard). They are not applied yet because two services cannot
-start without secrets the operator enters, and no secret is ever set through an agent or in source.
+**State: applied 2026-09-30 (02:52 UTC) and running.** Both services online, one replica each, no crashes. The
+variables are set: `db` — `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_PASSWORD`, `PGDATA`, `RAILWAY_RUN_UID=0` (the image
+runs as a non-root user and a Railway volume is root-owned); `app` — `ASPNETCORE_ENVIRONMENT=Staging`,
+`ASPNETCORE_URLS`, `PORT=8080`, `ProjectX__CredentialKey`, `ProjectX__DataTier=Simulated`, `ProjectX__ApiKey`,
+`ProjectX__ApiSecret`, `Jwt__SigningKey`, `Bootstrap__Email`, `Bootstrap__Password`, and
+`ConnectionStrings__Default`, a **reference** (`${{db.POSTGRES_PASSWORD}}` and friends) so the password is resolved by
+Railway and never written here. **Secrets are entered by the operator in the dashboard; no secret is ever set through
+an agent or appears in source or in chat.** A signing key under 32 bytes boots and then fails on the first sign-in.
 
-**Non-secret variables already staged.** `db`: `POSTGRES_USER`, `POSTGRES_DB`, `PGDATA`, `RAILWAY_RUN_UID=0`
-(the image runs as a non-root user and a Railway volume is root-owned). `app`: `ASPNETCORE_ENVIRONMENT=Staging`,
-`ASPNETCORE_URLS`, `PORT=8080`, `ProjectX__CredentialKey`, `ProjectX__DataTier=Simulated`, and
-`ConnectionStrings__Default`, which is a **reference** (`${{db.POSTGRES_PASSWORD}}` and friends), so the password is
-resolved by Railway and never written here.
+**The custom domain's target port must be `8080`.** It was first `80`, and every request returned `502` with
+`connection refused` in Railway's HTTP log, because the app listens on `8080`. Fixed 2026-09-30.
 
-**Operator setup — secrets, in the Railway dashboard (variable names only; values never in the repo or in chat):**
+**Observed at the first deploy (2026-09-30):**
+- Postgres 17 initialised on the mounted volume, so `RAILWAY_RUN_UID=0` and the `PGDATA` subdirectory work. Railway
+  labels every Postgres log line `error` because Postgres writes to stderr; read the message, not the label.
+- TimescaleDB works: `create_hypertable` succeeded for `Events`, `Bars` and `IndicatorValues`. The migrations ran.
+- Public checks through the domain: `/health` → `200` `{"status":"healthy"}`, `/ready` → `200` `{"status":"ready"}`
+  (it checks the database), `/` serves the SPA, and a real protected route (`/api/triggers`) answers `401`. Note that
+  paths that are not API routes also return `200`, because the SPA fallback serves `index.html`.
+- R-13, **startup only**: `AutoFlattenWatchdogHost` logged "started; evaluating every 00:00:20" and `AutoFlattenHost`
+  "scheduler started; evaluating every 00:00:15".
+- The app logs a warning that the **dead-man's switch is not configured**. Expected on staging; the section below
+  makes it required before anything live.
 
-1. `db` → `POSTGRES_PASSWORD`. Set this first; the database image refuses to start without it.
-2. `app` → `Jwt__SigningKey` (at least 32 bytes — a shorter key boots and then throws on the first sign-in),
-   `Bootstrap__Email` and `Bootstrap__Password` (the first operator; nothing signs in without them).
-3. `app` → `ProjectX__ApiKey` and `ProjectX__ApiSecret`, **practice credentials only** (R-14). Leave them unset and
-   ingestion stays idle, which is a safe way to bring the stack up first. Optional: `Finnhub__ApiKey`, `Tiingo__ApiKey`.
-4. Commit the staged changes. Then confirm, in order: `db` is healthy and its logs show the cluster initialised in the
-   mounted subdirectory; `app` starts (`/health` is liveness only); `/ready` returns 200 (it checks the database);
-   the migrations' `CREATE EXTENSION` for TimescaleDB and pgvector succeeded.
-5. Only then generate a public domain, and sign in once.
+**Still unverified — do not read the above as proof of these:**
+- **pgvector.** Postgres ran several `CREATE EXTENSION` statements at init and its log carries no "pgvector
+  unavailable" warning, which points to it being present, but no log line states it and `/ready` does not report it.
+- **Sign-in.** Not exercised: it needs the operator's credentials, which an agent does not use.
+- **R-13 beyond startup.** That the watchdog keeps evaluating, and would flatten, is not shown by a startup log.
+  `scripts/verify-deploy.sh` probes `/ready` and checks only for a `200`, so it does not prove it either.
+- **That the ProjectX keys are practice-only (R-14).** `ProjectX__DataTier=Simulated` is the safe tier; the account
+  behind the keys is the operator's to confirm.
 
-**Unverified until the first deploy** — record what you observe here: that the volume and `RAILWAY_RUN_UID=0` let the
-Timescale image initialise (the standard failure is a permissions error on the data directory); that the migrations
-find both extensions; and that the R-13 flatten watchdog is running (its host logs at startup). `verify-deploy.sh`
-checks for a 200 only, so it does not prove the watchdog.
+**Worth knowing.** The hostname was being probed by internet scanners within minutes of the domain going live (every
+probe got a `502` before the port was fixed; nothing was served). The app logs every SQL command at `Info`, which is
+a lot of Railway log volume. `AccountEventSubscriptionSupervisor` logs "stream ended; re-subscribing after 5 s" in a
+loop, probably because no venue accounts exist yet (not confirmed). The `timescaledb` extension reports "not
+up-to-date" against the image's library; harmless until an `ALTER EXTENSION timescaledb UPDATE` is chosen.
 
 **Not decided here:** a CI deploy hook (`RAILWAY_DEPLOY_HOOK_STAGING`) for this project — until one exists, a new
 image is deployed by changing the `app` image tag by hand. The older `soothing-illumination` project, which the
