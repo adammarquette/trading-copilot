@@ -53,6 +53,52 @@ cloud environments still need creating, so nothing deploys today.
   behaviors on a Timescale-enabled instance (locally: the compose `timescaledb-ha` image, which bundles both
   extensions).
 
+### Railway staging — `gentle-charm` (gh#1211; staged, **not yet applied**)
+
+A second Railway project, created 2026-09-29, holds the staging deploy that replaces the withdrawn AWS plan
+([ADR-0030](adr/0030-aws-deployment-topology.md), gh#1215). Its `staging` environment is **practice-only** (R-14):
+`ASPNETCORE_ENVIRONMENT=Staging` maps through `DeploymentEnvironmentMapping`, where only the exact name
+`Production` unlocks live accounts and an unrecognised name fails closed to practice-only.
+
+| Item | Id / value |
+| --- | --- |
+| Project · workspace | `gentle-charm` · `6006560b-337d-45f8-911a-44c5ef8e9316` · *Gauntlet Projects* |
+| `staging` environment | `63cb3d40-aca1-4c11-a143-ac4b0b8aac7d` (`production` also exists here and is **left empty**) |
+| `app` service | `7307119a-4776-49e9-b171-43acb9f2175a` — image `ghcr.io/adammarquette/trading-copilot:sha-ccd1260` (pinned; bump to a newer `:sha-<short>`, never a floating tag), port `8080`, healthcheck `/health` 120 s, restart `ALWAYS`, sleep off |
+| `db` service | `ebb0255e-14e1-49bf-a160-ac056cf3e976` — image `timescale/timescaledb-ha:pg17` (TimescaleDB + pgvector, as the local compose), restart `ALWAYS`, sleep off |
+| `db-data` volume | `46d6210c-78fc-4531-8200-4a1f012b3bce`, mounted at `/home/postgres/pgdata`; `PGDATA=/home/postgres/pgdata/data` so the cluster sits in a subdirectory of the mount |
+
+**State: staged in Railway's pending changes, not applied.** Nothing runs and nothing bills until the staged changes
+are committed (`accept-deploy`, or *Deploy* in the dashboard). They are not applied yet because two services cannot
+start without secrets the operator enters, and no secret is ever set through an agent or in source.
+
+**Non-secret variables already staged.** `db`: `POSTGRES_USER`, `POSTGRES_DB`, `PGDATA`, `RAILWAY_RUN_UID=0`
+(the image runs as a non-root user and a Railway volume is root-owned). `app`: `ASPNETCORE_ENVIRONMENT=Staging`,
+`ASPNETCORE_URLS`, `PORT=8080`, `ProjectX__CredentialKey`, `ProjectX__DataTier=Simulated`, and
+`ConnectionStrings__Default`, which is a **reference** (`${{db.POSTGRES_PASSWORD}}` and friends), so the password is
+resolved by Railway and never written here.
+
+**Operator setup — secrets, in the Railway dashboard (variable names only; values never in the repo or in chat):**
+
+1. `db` → `POSTGRES_PASSWORD`. Set this first; the database image refuses to start without it.
+2. `app` → `Jwt__SigningKey` (at least 32 bytes — a shorter key boots and then throws on the first sign-in),
+   `Bootstrap__Email` and `Bootstrap__Password` (the first operator; nothing signs in without them).
+3. `app` → `ProjectX__ApiKey` and `ProjectX__ApiSecret`, **practice credentials only** (R-14). Leave them unset and
+   ingestion stays idle, which is a safe way to bring the stack up first. Optional: `Finnhub__ApiKey`, `Tiingo__ApiKey`.
+4. Commit the staged changes. Then confirm, in order: `db` is healthy and its logs show the cluster initialised in the
+   mounted subdirectory; `app` starts (`/health` is liveness only); `/ready` returns 200 (it checks the database);
+   the migrations' `CREATE EXTENSION` for TimescaleDB and pgvector succeeded.
+5. Only then generate a public domain, and sign in once.
+
+**Unverified until the first deploy** — record what you observe here: that the volume and `RAILWAY_RUN_UID=0` let the
+Timescale image initialise (the standard failure is a permissions error on the data directory); that the migrations
+find both extensions; and that the R-13 flatten watchdog is running (its host logs at startup). `verify-deploy.sh`
+checks for a 200 only, so it does not prove the watchdog.
+
+**Not decided here:** a CI deploy hook (`RAILWAY_DEPLOY_HOOK_STAGING`) for this project — until one exists, a new
+image is deployed by changing the `app` image tag by hand. The older `soothing-illumination` project, which the
+sections above still describe, is untouched.
+
 ## AWS environment stack
 
 > **Withdrawn (2026-09-29, gh#1215).** The AWS plan is dropped and Railway is the running cloud. This section and
