@@ -54,7 +54,9 @@ public static class TelemetryRegistration
                     .SetResourceBuilder(resource)
                     .AddSource(Source.Name)
                     .AddAspNetCoreInstrumentation(instrumentation => instrumentation.RecordException = true)
-                    .AddHttpClientInstrumentation()
+                    // A Discord webhook URL carries its token in the path, and the span records the full URL: those
+                    // requests are not traced at all, so the credential never reaches a trace backend (gh#1157).
+                    .AddHttpClientInstrumentation(http => http.FilterHttpRequestMessage = request => !CarriesCredentialInUrl(request))
                     // EF Core's Postgres provider emits its own spans; adding the source is how DB commands
                     // appear in the trace without a separate (still pre-release) EF instrumentation package.
                     .AddSource("Npgsql");
@@ -111,4 +113,12 @@ public static class TelemetryRegistration
 
         return builder;
     }
+
+    // Discord's webhook URL IS the credential: https://<discord host>/api/webhooks/<id>/<token>.
+    private static bool CarriesCredentialInUrl(HttpRequestMessage request) =>
+        request.RequestUri is { IsAbsoluteUri: true } uri
+        && (uri.Host.Equals("discord.com", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.Equals("discordapp.com", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".discord.com", StringComparison.OrdinalIgnoreCase))
+        && uri.AbsolutePath.StartsWith("/api/webhooks/", StringComparison.Ordinal);
 }

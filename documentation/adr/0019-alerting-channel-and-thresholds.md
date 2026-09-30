@@ -722,3 +722,72 @@ inside the refusal window is re-offered under a fresh ordinal and re-arms the ke
 and `TriggerEvaluationService`'s one-shot staleness resolve has no equivalent belt at all. Tradovate is frozen
 (`gh#41`) in any case, so nothing there is touched; the point is that a later reader must not remove it *citing
 this update*.
+
+## Update (2026-09-29) — Discord is the second transport: advisory-only, publish-only, in the same chain (gh#1157)
+
+The seam this ADR established did what it promised: **Discord arrived as an implementation, not a parallel path.**
+`DiscordNotificationChannel` sits behind `INotificationChannel` beside the Pushover adapter, is reached through the
+same outbox → queue → dedup chain, and adds no ADR-level decision beyond the four below. The operator scheduled the
+**publish half** only (gh#100); anything two-way — replies, threads, a listening bot — stays a separate, separately
+gated card.
+
+**It publishes the advisory the seam already emits and is not the pager.** This ADR rejected Discord *as the pager*
+(no acknowledgement loop, no DND bypass, easily muted) and that stands. So the adapter *renders* severity — embed
+colour, a footer label, and Discord's silent flag for `Quiet` — and never reinterprets it: a `Page` gains no mention
+and no repeat, and `allowed_mentions` is empty so text inside a title or body can never ping anyone. Pushover stays
+the only thing that wakes the operator. No order action can originate here (R-5 / R-11 enforcement is below the
+model, ADR-0007).
+
+**Two destinations, chosen by which secrets are set.** A channel **webhook** (`Discord__WebhookUrl`) posts to a
+channel; a **bot token plus the operator's user id** (`Discord__BotToken`, `Discord__OperatorUserId`) opens a DM to
+that one pinned recipient and posts into it; all three does both. Options are bound with the Options pattern from the
+environment and **validated on start**: keyless is legal, but a half-set DM pair, a non-snowflake user id, or a
+webhook that is not an https Discord webhook URL stops the boot, naming the key and never the value. A keyless host
+registers **no** Discord channel and logs that it is absent, mirroring the news providers' conditional registration;
+nothing falls back to a hardcoded credential. `SendAsync` reports *accepted* when either destination took it, and a
+`429` is logged as **rate-limiting with its `Retry-After`** rather than as a generic rejection — throttling and an
+outage must read differently.
+
+**Known limitation: when both destinations are configured, a DM failure after a webhook success is not retried by
+itself.** Because the one `SendAsync` reports accepted when *either* took it, the lane's dedup memory records the
+incident as told, and the next re-emission is suppressed for the whole transport. Only the *webhook* having failed
+too (both destinations failing) leaves the lane retryable. This was left as is deliberately: it is an advisory copy,
+Pushover is unaffected, and splitting the two destinations into separate lanes is a larger change than this card.
+
+**A failed Discord send is retried by the next re-emission, not by the outbox.** The relay stamps a row delivered
+once the *queue* accepts it; the pump then delivers into the dedup lanes and ignores their result, so a lane that
+did not deliver (a `429`, a `5xx`, a timeout) is simply not recorded as told, and the *next escalation
+re-emission of the same incident key* re-sends it. The auto-flatten and its watchdog re-emit every ~15–20 s; a
+one-shot producer (a single "Reviewed setup available" advisory) does not, so a Discord failure there is not retried.
+
+**One transport slot, one dedup lane per transport — deliberately not one shared memory.** The chain's transport slot
+held a single channel, so two transports need a fan-out; the tempting shape, one dedup above it, is wrong. A shared
+"already told" memory records the incident as delivered as soon as *any* transport accepts it, so a Discord success
+would silence a Pushover page that had failed — the pager muted by the advisory copy, the exact failure this ADR's
+noise budget exists to prevent in reverse. `FanOutNotificationChannel` therefore wraps each transport in **its own**
+`DedupingNotificationChannel` and reports accepted when any lane did: the auto-flatten's next re-emission reaches the
+lane that has not yet delivered and does not re-post to the one that has, and a repeated key is still reported once
+per transport. It is also the `IIncidentKeyRegistry` the queue releases through (gh#1077), releasing the key in
+**every** lane. With one transport (a host with only Pushover, only Discord, or neither) the chain is exactly the one
+that existed before — a single dedup, no fan-out.
+
+**The pump waits on Discord for a bounded time, and Pushover is never gated on it.** The queue pump is a single
+reader and the fan-out awaits every lane, and the Discord lane can make three sequential calls (webhook, open the DM,
+post the DM) of up to 10 s each — so an unbounded Discord could hold the *next* queued notification for ~30 s. The
+Discord lane is therefore wrapped, beneath its own dedup lane, in `BoundedNotificationChannel` with a **5 s total
+deadline** for all of its calls (a named constant, not an operator knob; a healthy Discord answers in well under a
+second). On the deadline the abandoned call is cancelled through a linked token and the pump stops waiting for it
+even if it ignores the token; the outcome is "not accepted" for *that lane's* dedup memory only, so the next
+re-emission retries Discord; and any late fault of the abandoned call is observed, never unobserved. A non-HTTP
+exception from the lane is absorbed the same way, logged by type only. What this does and does not promise: the
+Pushover send for an item is never gated on Discord (the lanes run concurrently) and is never shortened by the
+bound, and the worst case the pump now waits for one item is the slower of Pushover's own send and Discord's 5 s —
+not the sum. It does **not** mean a slow Discord costs nothing: for up to 5 s per item it still occupies the pump.
+The R-13 flatten pass is unaffected either way, because the queue decouples it (gh#289).
+
+**The webhook URL is a credential, and the platform would have leaked it twice.** Its token is in the request *path*.
+The default `HttpClient` logging writes the full request URI at Information, and the OpenTelemetry HTTP client
+instrumentation records the full URL on the exported span, so the Discord client has the default logging removed and
+requests to a Discord webhook are excluded from tracing. Neither is visible from the adapter's own tests, which is why
+each has a guard at the registration that would fail if it were dropped. The adapter itself logs no request URI and no
+exception object — only the exception's type — so a transport fault cannot carry the URL into a log line.

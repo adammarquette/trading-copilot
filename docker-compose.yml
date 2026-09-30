@@ -202,6 +202,13 @@ services:
       # nags. Switched from `${…:-60}` when gh#236 established the convention documented above.
       Pushover__PageRetrySeconds:
       Pushover__PageExpireSeconds:
+      # Discord, the advisory-only second transport (gh#1157, ADR-0019). Null pass-through and deliberately
+      # UNDEFAULTED secrets, like Pushover above: a made-up webhook would let the app believe it reaches the operator
+      # when it does not. Absent, no Discord channel is registered and the app says so at startup. A half-set DM pair
+      # (a bot token without the user id, or the reverse) fails the boot on purpose.
+      Discord__WebhookUrl:
+      Discord__BotToken:
+      Discord__OperatorUserId:
       # The agent-review LLM (gh#402 / gh#423, ADR-0008). Null pass-through: Llm__ApiKey is an UNDEFAULTED secret --
       # absent, the agent-review route runs review-less (it still fires and still tells the operator a setup needs
       # review) rather than waking a model, so a dev stack makes no paid calls unless the operator sets it. The model

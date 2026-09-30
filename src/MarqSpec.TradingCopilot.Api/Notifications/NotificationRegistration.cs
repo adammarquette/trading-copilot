@@ -17,6 +17,11 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// </remarks>
 public static class NotificationRegistration
 {
+    // The TOTAL time the pump waits for the Discord lane -- all of its calls together. Well under the ~30 s the three
+    // sequential 10 s calls could take, long enough for a healthy Discord (a call is normally well under a second).
+    // A named constant, not an env knob: nothing about it is an operator decision.
+    private static readonly TimeSpan _discordLaneDeadline = TimeSpan.FromSeconds(5);
+
     /// <summary>Adds the notification chain and the pump that drains it.</summary>
     /// <param name="builder">The host builder.</param>
     /// <returns>The builder, for chaining.</returns>
@@ -37,6 +42,26 @@ public static class NotificationRegistration
         builder.Services.AddHttpClient<PushoverNotificationChannel>(
             client => { client.Timeout = TimeSpan.FromSeconds(10); });
 
+        // Discord (gh#1157) -- a SECOND transport in the same chain, never a parallel path. Options are always bound
+        // and validated on start, so a half-set DM pair fails the boot rather than the first advisory. The channel
+        // itself is registered ONLY when a target is configured, mirroring the news providers: a keyless host carries
+        // no Discord channel, says so below, and never falls back to a hardcoded credential.
+        builder.Services.AddSingleton<IValidateOptions<DiscordOptions>, DiscordOptionsValidator>();
+        builder.Services.AddOptions<DiscordOptions>()
+            .Bind(builder.Configuration.GetSection(DiscordOptions.SectionName))
+            .ValidateOnStart();
+
+        bool discordConfigured = (builder.Configuration.GetSection(DiscordOptions.SectionName).Get<DiscordOptions>()
+            ?? new DiscordOptions()).IsConfigured;
+        if (discordConfigured)
+        {
+            builder.Services.AddHttpClient<DiscordNotificationChannel>(
+                    client => { client.Timeout = TimeSpan.FromSeconds(10); })
+                // The webhook TOKEN is in the request path, and the default HttpClient logging writes the full URI
+                // at Information -- that would put a credential in the log.
+                .RemoveAllLoggers();
+        }
+
         // The chain, outermost first: QUEUE -> dedup -> transport.
         //
         // The queue is outermost because the caller is the auto-flatten, and gh#289 showed what awaiting a transport
@@ -50,12 +75,60 @@ public static class NotificationRegistration
         builder.Services.AddSingleton<QueuedNotificationChannel>(provider =>
         {
             PushoverOptions pushover = provider.GetRequiredService<IOptions<PushoverOptions>>().Value;
-            INotificationChannel transport = pushover.IsConfigured
-                ? provider.GetRequiredService<PushoverNotificationChannel>()
-                : provider.GetRequiredService<NullNotificationChannel>();
+            ILogger<DedupingNotificationChannel> dedupLogger = provider.GetRequiredService<ILogger<DedupingNotificationChannel>>();
 
-            DedupingNotificationChannel deduping = new(
-                transport, provider.GetRequiredService<ILogger<DedupingNotificationChannel>>());
+            // Every configured transport gets its OWN dedup memory (gh#1157). One transport is exactly the chain
+            // that existed before -- a single dedup over Pushover, Discord, or the null channel -- so adding Discord
+            // changes nothing for a host that does not use it.
+            List<INotificationChannel> transports = [];
+            if (pushover.IsConfigured)
+            {
+                transports.Add(provider.GetRequiredService<PushoverNotificationChannel>());
+            }
+
+            ILogger discordLog = provider.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(NotificationRegistration).FullName!);
+            if (discordConfigured)
+            {
+                // Bounded (gh#1157): the pump is a single reader and the fan-out awaits every lane, and Discord can
+                // make three sequential calls of up to 10 s each. This caps what the pump waits for it; Pushover is
+                // never wrapped, so its send is never gated on Discord.
+                transports.Add(new BoundedNotificationChannel(
+                    provider.GetRequiredService<DiscordNotificationChannel>(),
+                    "Discord",
+                    _discordLaneDeadline,
+                    provider.GetRequiredService<ILogger<BoundedNotificationChannel>>()));
+                discordLog.LogInformation("Discord notifications enabled; advisories are also published there (publish-only).");
+            }
+            else
+            {
+                discordLog.LogInformation(
+                    "Discord notifications are not configured (Discord__WebhookUrl, or Discord__BotToken with Discord__OperatorUserId); no Discord channel is registered.");
+            }
+
+            if (transports.Count == 0)
+            {
+                transports.Add(provider.GetRequiredService<NullNotificationChannel>());
+            }
+
+            DedupingNotificationChannel[] lanes =
+                [.. transports.Select(transport => new DedupingNotificationChannel(transport, dedupLogger))];
+
+            // The dedup layer is one object seen through two interfaces below, so it is built as ONE instance here:
+            // the lone lane, or the fan-out that owns every lane's memory (which implements the registry by
+            // releasing the key in all of them).
+            INotificationChannel deduping;
+            IIncidentKeyRegistry incidents;
+            if (lanes.Length == 1)
+            {
+                deduping = lanes[0];
+                incidents = lanes[0];
+            }
+            else
+            {
+                FanOutNotificationChannel fanOut = new(lanes);
+                deduping = fanOut;
+                incidents = fanOut;
+            }
 
             // `deduping` is passed TWICE, and that is the binding, not a redundancy (gh#1077). The queue needs the
             // dedup layer for two different things: as the channel it delivers into, and as the IIncidentKeyRegistry
@@ -65,7 +138,7 @@ public static class NotificationRegistration
             // still be held. Same failure shape as gh#455's two-instance enlister.
             return new QueuedNotificationChannel(
                 deduping,
-                deduping,
+                incidents,
                 provider.GetRequiredService<IExecutionMetrics>(),
                 provider.GetRequiredService<ILogger<QueuedNotificationChannel>>());
         });

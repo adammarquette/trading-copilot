@@ -995,6 +995,50 @@ stops as soon as a real URL is set.
 re-provisioning and volume persistence). `prometheus.yml` already mounts a `rules/` directory, so `gh#245`'s
 alerting rules arrive as reviewable files rather than console state.
 
+### Discord notifications — the advisory transport (`gh#1157`, ADR-0019)
+
+The app can also publish the advisories it already emits (a *"Reviewed setup available"*, a stand-down notice) to
+Discord, as a **second transport beside Pushover** through the same outbox → queue → dedup chain. It is
+**publish-only** — it posts and returns, nothing reads a reply, and no order action can originate from it — and it
+is **not the pager**: Discord messages never mention anyone and a Page is not repeated, so keep Pushover (above)
+for anything that must wake you.
+
+Set any of these on the **app** (under compose they are forwarded because they are named in the app service's
+`environment:` map; on a hosted environment, put them in its secret store, never in a file):
+
+| Variable | What it is |
+|---|---|
+| `Discord__WebhookUrl` | a channel webhook (Channel settings → Integrations → Webhooks); posts to that channel |
+| `Discord__BotToken` | a bot token; with the next value, sends you a **DM** |
+| `Discord__OperatorUserId` | your numeric Discord user id (Developer Mode → Copy User ID); the **only** recipient a DM is ever sent to |
+
+Which destination is used follows from what is set: the webhook alone → channel; the token **and** user id → DM;
+all three → both. The bot must share a server with you for Discord to allow the DM. All three are secrets, and the
+webhook URL carries its token in the path — treat it exactly like the bot token. The app never logs it, turns the
+default HTTP request logging off for this client, and does not trace requests to it.
+
+What to expect:
+
+- **Keyless is allowed.** With none set, the app registers no Discord channel and logs
+  *"Discord notifications are not configured … no Discord channel is registered"* once at startup. Nothing falls back
+  to a default credential.
+- **A half-set or malformed value stops the boot**, naming the key (never the value): a bot token without the user
+  id (or the reverse), a non-numeric user id, or a webhook that is not an `https://discord.com/api/webhooks/…` URL.
+- **A `429` is throttling, not an outage.** The log line says *rate-limited* with Discord's `Retry-After`; the
+  notification is **not** recorded as told for Discord, so the **next escalation re-emission** of the same incident
+  re-sends it (the auto-flatten and its watchdog re-emit every ~15–20 s). The outbox does **not** re-offer it — the
+  relay already stamped the row delivered when the queue accepted it — so a one-shot advisory that Discord throttled
+  is not retried. A `5xx` reads differently (*rejected with 500*), and a Discord that does not answer within its
+  5 s total deadline is logged as *exceeded its deadline* and abandoned so it cannot hold the notification pump.
+- **When both destinations (webhook and DM) are set, a DM failure after a webhook success is not retried by
+  itself**: the send reports accepted if either took it. Known limitation; Pushover is unaffected.
+- **Each transport dedups on its own**, so a Discord failure never suppresses a Pushover page and a Pushover
+  success never hides a Discord failure; a repeated incident is still reported once per transport.
+
+**Verify after setting or rotating a value.** Discord has no synthetic-alert button here: trigger a real advisory
+(or start the app and watch for the *"Discord notifications enabled"* line), and confirm the message arrives. An
+unverified transport is an assumption.
+
 ## When a page arrives
 
 Every alert's `runbook` annotation links to one of the sections below — these are what you read at 03:00, so
