@@ -133,8 +133,8 @@ them is optional:
   however much the parent would like you to.
 
 The prompt that carries these rules to a spawned reviewer is
-[`.github/reviewer-prompt-verdict.md`](../../.github/reviewer-prompt-verdict.md) (its substance shared with the
-advisory CI reviewer via `reviewer-prompt.md`). If you are re-spawned because an approval went **stale**, you are
+[`.github/reviewer-prompt-verdict.md`](../../.github/reviewer-prompt-verdict.md) (its substance is in
+`reviewer-prompt.md`). If you are re-spawned because an approval went **stale**, you are
 reviewing the current head afresh — the earlier approval is not a starting position you can defend.
 
 ### Ruling takes an identity, and not every session has one
