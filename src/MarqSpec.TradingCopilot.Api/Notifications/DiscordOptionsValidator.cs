@@ -18,7 +18,7 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// </remarks>
 public sealed class DiscordOptionsValidator : IValidateOptions<DiscordOptions>
 {
-    private static readonly string[] WebhookHosts =
+    private static readonly string[] _webhookHosts =
         ["discord.com", "discordapp.com", "ptb.discord.com", "canary.discord.com"];
 
     /// <inheritdoc />
@@ -59,6 +59,6 @@ public sealed class DiscordOptionsValidator : IValidateOptions<DiscordOptions>
     private static bool IsDiscordWebhook(string value) =>
         Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
         && uri.Scheme == Uri.UriSchemeHttps
-        && WebhookHosts.Contains(uri.Host, StringComparer.OrdinalIgnoreCase)
+        && _webhookHosts.Contains(uri.Host, StringComparer.OrdinalIgnoreCase)
         && uri.AbsolutePath.StartsWith("/api/webhooks/", StringComparison.Ordinal);
 }

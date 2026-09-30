@@ -95,7 +95,7 @@ public class DiscordOptionsValidatorTests
 
         result.Failed.Should().BeTrue();
         result.Failures.Should().ContainSingle().Which.Should().Contain("Discord:WebhookUrl");
-        string.Join(' ', result.Failures!).Should().NotContain("fake-token","a webhook URL is a credential");
+        string.Join(' ', result.Failures!).Should().NotContain("fake-token", "a webhook URL is a credential");
     }
 
     [Theory]

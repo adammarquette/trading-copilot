@@ -31,9 +31,9 @@ public class DiscordNotificationRegistrationTests
     private const string BotToken = "fake-bot-token-do-not-use";
     private const string OperatorId = "222222222222222222";
 
-    private static readonly Dictionary<string, string?> WebhookConfig = new() { ["Discord:WebhookUrl"] = WebhookUrl };
+    private static readonly Dictionary<string, string?> _webhookConfig = new() { ["Discord:WebhookUrl"] = WebhookUrl };
 
-    private static readonly Dictionary<string, string?> PushoverConfig = new()
+    private static readonly Dictionary<string, string?> _pushoverConfig = new()
     {
         ["Pushover:AppToken"] = "fake-pushover-app-token",
         ["Pushover:UserKey"] = "fake-pushover-user-key",
@@ -82,7 +82,7 @@ public class DiscordNotificationRegistrationTests
     [Fact]
     public void AddTradingCopilotNotifications_ShouldRegisterTheDiscordChannel_WhenAWebhookIsSet()
     {
-        WebApplicationBuilder builder = Builder(WebhookConfig);
+        WebApplicationBuilder builder = Builder(_webhookConfig);
 
         builder.AddTradingCopilotNotifications();
 
@@ -102,7 +102,7 @@ public class DiscordNotificationRegistrationTests
     [Fact]
     public void AddTradingCopilotNotifications_ShouldPutDiscordBeneathDedup_WhenItIsTheOnlyTransport()
     {
-        using WebApplication app = Compose(WebhookConfig);
+        using WebApplication app = Compose(_webhookConfig);
 
         TransportBeneathDedup(app.Services.GetRequiredService<QueuedNotificationChannel>())
             .Should().BeOfType<DiscordNotificationChannel>("Discord rides the SAME queue -> dedup chain, not a parallel path");
@@ -111,7 +111,7 @@ public class DiscordNotificationRegistrationTests
     [Fact]
     public void AddTradingCopilotNotifications_ShouldStillBeBoundToTheOutbox_WhenDiscordIsKeyed()
     {
-        using WebApplication app = Compose(WebhookConfig);
+        using WebApplication app = Compose(_webhookConfig);
         using IServiceScope scope = app.Services.CreateScope();
 
         scope.ServiceProvider.GetRequiredService<INotificationChannel>().Should().BeOfType<OutboxNotificationChannel>(
@@ -121,7 +121,7 @@ public class DiscordNotificationRegistrationTests
     [Fact]
     public void AddTradingCopilotNotifications_ShouldFanOutToPushoverThenDiscord_WhenBothAreKeyed()
     {
-        using WebApplication app = Compose(Merge(PushoverConfig, WebhookConfig));
+        using WebApplication app = Compose(Merge(_pushoverConfig, _webhookConfig));
         QueuedNotificationChannel queue = app.Services.GetRequiredService<QueuedNotificationChannel>();
 
         FanOutNotificationChannel fanOut = InnerOf(queue).Should().BeOfType<FanOutNotificationChannel>().Subject;
@@ -135,7 +135,7 @@ public class DiscordNotificationRegistrationTests
     [Fact]
     public void AddTradingCopilotNotifications_ShouldLeavePushoverAloneBeneathDedup_WhenDiscordIsKeyless()
     {
-        using WebApplication app = Compose(PushoverConfig);
+        using WebApplication app = Compose(_pushoverConfig);
 
         TransportBeneathDedup(app.Services.GetRequiredService<QueuedNotificationChannel>())
             .Should().BeOfType<PushoverNotificationChannel>("Discord being absent must not change the existing chain");
@@ -162,7 +162,7 @@ public class DiscordNotificationRegistrationTests
     {
         CountingHandler pushover = new(HttpStatusCode.OK, """{"status":1}""");
         CountingHandler discord = new(HttpStatusCode.NoContent, string.Empty);
-        using WebApplication app = Compose(Merge(PushoverConfig, WebhookConfig), configure: services =>
+        using WebApplication app = Compose(Merge(_pushoverConfig, _webhookConfig), configure: services =>
         {
             services.AddHttpClient<PushoverNotificationChannel>().ConfigurePrimaryHttpMessageHandler(() => pushover);
             services.AddHttpClient<DiscordNotificationChannel>().ConfigurePrimaryHttpMessageHandler(() => discord);
@@ -202,7 +202,7 @@ public class DiscordNotificationRegistrationTests
     public void AddTradingCopilotNotifications_ShouldPassStartupValidation_WhenKeylessOrFullyKeyed()
     {
         using WebApplication keyless = Compose(config: []);
-        using WebApplication keyed = Compose(WebhookConfig);
+        using WebApplication keyed = Compose(_webhookConfig);
 
         keyless.Services.GetRequiredService<IStartupValidator>().Validate();
         keyed.Services.GetRequiredService<IStartupValidator>().Validate();
@@ -213,7 +213,7 @@ public class DiscordNotificationRegistrationTests
     {
         // The webhook token lives in the request PATH, and the default HttpClient logging writes the full
         // request URI at Information -- which would put the credential in the log.
-        using WebApplication app = Compose(Merge(PushoverConfig, WebhookConfig));
+        using WebApplication app = Compose(Merge(_pushoverConfig, _webhookConfig));
         IHttpMessageHandlerFactory handlers = app.Services.GetRequiredService<IHttpMessageHandlerFactory>();
 
         // The Pushover client is the control: its chain DOES carry the logging handlers, so this can fail.
