@@ -55,6 +55,16 @@ Loaded **on demand by role**, not by directory. See the table at the top of the 
 | [`agents/code-reviewer.md`](agents/code-reviewer.md) | 3.4K | You are reviewing any change, anywhere. |
 | [`agents/platform.md`](agents/platform.md) | 1.9K | You are touching CI/CD, the image, compose or deploy. |
 | [`agents/coordinator.md`](agents/coordinator.md) | 3.3K | You are assigning work from the board, or driving a task to approval. Reviewer, Platform and Coordinator **never auto-load**. |
+| [`agents/doc-simplifier.md`](agents/doc-simplifier.md) | 10.2K | You are writing the short "front door" versions of the root documents from their full references. *Imported; not yet adapted to this repo.* |
+| [`agents/wiki-editor.md`](agents/wiki-editor.md) | 5.0K | A batch of changes has landed in the wiki and you are fixing what stopped being true. *Imported; not yet adapted to this repo.* |
+| [`agents/multi-agent.md`](agents/multi-agent.md) | 1.5K | More than one agent tool shares the board — one lead, the others until review. *Imported.* |
+| [`agents/task-sizing.md`](agents/task-sizing.md) | 1.6K | You are choosing the cheapest model that can finish a task, or estimating time to complete. A shared rubric, not a role. *Imported.* |
+
+**Imported reference set — [`agents/imported/`](agents/imported/).** Generic versions of `README`,
+`code-reviewer`, `coordinator` and `platform` that collide by name with this repo's tailored contracts above.
+They are **not contracts here**: nothing routes to them and they must not be followed as such. They are there to
+be diffed against the tailored versions and merged from. Sizes: `README` 4.1K, `code-reviewer` 9.6K,
+`coordinator` 13.4K, `platform` 10.2K.
 
 The two subtree contracts — [`src/AGENTS.md`](../src/AGENTS.md) (Coding) and
 [`IntegrationTests/AGENTS.md`](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) (QA) — load from their

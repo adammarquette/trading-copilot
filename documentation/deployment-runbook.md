@@ -533,43 +533,29 @@ configuration that lives only in a provider console is otherwise invisible to an
    idle first. Record whichever direction the run turns out on the gh#1012 issue and PR #1013, exactly as it ran;
    a run that could not start (missing credentials) is reported as *not run*, never as a pass.
 
-### Automated code review — one workflow, one dormant ruleset
-Two mechanisms have carried this name. Only the first is live.
+### Automated code review — one retired workflow, one dormant ruleset
+Two mechanisms have carried this name. Neither is running: the first is retired and the second is disabled.
 
-**1. The `reviewer` workflow (`.github/workflows/reviewer.yml`, gh#802) — live.** On every non-draft PR it runs
-the [code-reviewer contract](agents/code-reviewer.md) over the diff and posts the result **as
-`trading-copilot-reviewer[bot]`** through [`.github/scripts/reviewer-review.sh`](../.github/scripts/reviewer-review.sh)
-(gh#141) — a distinct App identity, because GitHub blocks self-review and `gh` here authenticates as the PR's own
-author.
+**1. The `reviewer` workflow (`.github/workflows/reviewer.yml`, gh#802) — retired (gh#1227).** It ran the
+[code-reviewer contract](agents/code-reviewer.md) over each non-draft PR's diff with the Claude CLI and posted an
+advisory `COMMENT` as `trading-copilot-reviewer[bot]`. It is gone because the operator does not use the Claude API,
+because it needed a funded Anthropic account the pipeline could not see (gh#994 — the same failure that hid the
+gh#1225 bug), and because it was never a required check. Removed with it: its advisory prompt and the outcome
+classifier and test that existed only for it.
 
-It is **advisory by construction**: it posts `COMMENT`, and it prepends a fixed header so the first line of what
-it posts can never be a `**Verdict: …**` marker. That matters because `review-verdict` (gh#783) reads that marker
-**regardless of the review's state** — emitting one would let the bot satisfy the human-review gate by itself.
-`VERDICT_MODE` in the workflow is the single switch; promoting it is a reviewable change, and the thing to watch
-before promoting is its **block rate**, not its throughput. A reviewer that approves everything converts the gate
-into a rubber stamp.
+**What is not retired is the reviewer App and the verdict machinery.** A spawned reviewer (gh#815) or the operator
+rules by posting a review whose first line is `**Verdict: …**`, which `review-verdict` (gh#783) reads; the App stays
+the preferred identity to post that under (setup below), and `verdict-state.sh` trusts it by default. None of it
+uses the Claude API.
 
-| Secret | Purpose | Set |
+| Secret | Purpose | State |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | Runs the reviewer. **Set (gh#811)** — but see the credit note below: the key authenticates, yet the model call still needs a funded account. | ☑ |
-| `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY` | Mint the App token the review is posted under (setup below). | ☑ 2026-07-24 |
+| `REVIEWER_APP_ID` · `REVIEWER_APP_INSTALLATION_ID` · `REVIEWER_APP_PRIVATE_KEY` | Mint the App token a verdict is posted under (setup below). | ☑ 2026-07-24 |
+| `ANTHROPIC_API_KEY` | Ran the retired CI reviewer. | **Delete it.** A console-only setting: the repo's Secrets page, not this change, removes it. |
 
-**The key's Anthropic account must hold credit — a console-only setting the pipeline cannot see.** With the
-key provisioned but its account unfunded, the model call returns HTTP 400 `Credit balance is too low` on
-**every** PR (gh#994). The `Review` step now classifies that (and any API-layer refusal the PR author cannot
-fix — a bad key, a rate limit, an overloaded/5xx backend) as **infra** and **skips with a `::warning::`
-rather than reddening the PR** — the same posture as an absent key, because a red check nobody can fix trains
-people to ignore reds. A *genuine* reviewer/workflow failure (a crash, a non-API error) still reddens. So a
-red `reviewer` check now means a real bug; a **warning-and-skip** means *fund the account* (add credit at the
-Anthropic console for the key's org). The classifier is `scripts/lib/reviewer-outcome.sh`, pinned by
-`scripts/tests/reviewer-outcome.test.sh` in CI.
-
-**Neither of these is what supplies a binding verdict today.** That is the reviewer an **author agent spawns**
-once its PR is green (`gh#815`) — same contract, but its verdict line *is* binding, and the author blocks on it
-with `scripts/watch-verdict.sh` instead of ending its turn (loop:
-[engineering §10](trading-platform-engineering.md)). So the unset key above costs the *pre-review*, not the gate.
-It is still worth setting — an independent second opinion on every push is exactly what a single-operator repo is
-short of.
+**A binding verdict comes from the reviewer an author agent spawns** once its PR is green (`gh#815`) — its verdict
+line *is* binding, and the author blocks on it with `scripts/watch-verdict.sh` instead of ending its turn (loop:
+[engineering §10](trading-platform-engineering.md)).
 
 #### Agent review identity — the gate is not satisfiable without one ☐
 
@@ -723,7 +709,7 @@ enabling a queue **before** the workflow triggers exist leaves every queued PR w
 **Interaction with `copilot-review-develop`.** The Copilot-review rule is a **pull-request** requirement, satisfied
 before a PR can be queued, so it should not interact with the queue at all. That is the expectation, not a verified
 fact — **confirm it on the first queued PR**, because this rule has already been observed to block merges silently
-with every check green and nothing in the checks tab (see *Automated code review* above).
+with every check green and nothing in the checks tab (see *Automated code review*, mechanism 2, above).
 
 **What it would look like.** Merging would become *Merge when ready*: the PR joins the queue, GitHub creates a
 temporary `gh-readonly-queue/develop/...` ref, CI runs against it, and the PR merges only if that run is green — so
