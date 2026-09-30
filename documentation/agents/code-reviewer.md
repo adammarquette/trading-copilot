@@ -65,10 +65,32 @@ name and stays in `.github/` because GitHub's reviewer reads that exact path; th
 - **Sign what you write.** An AI-authored inline note, review body or verdict comment ends with
   `Assisted-by: <Model Name> (<tool>)` — the same form as the commit trailer ([`CONTRIBUTING.md`](../../CONTRIBUTING.md)),
   on the comment itself. A single footer on the PR does not cover a comment you added later.
+- **Verify the issue's acceptance criteria and say so.** For each criterion on the linked issue, state *met*, *not
+  met* or *not verifiable*, with the evidence — a verdict that names none has not been checked against the
+  requirement. You do not tick the boxes: the issue belongs to its author and the maintainer.
+- **Re-read the head just before you post.** If it moved while you were reviewing, say so in the body and name
+  both SHAs; the gate will mark an approval on a superseded head stale and the author will spawn a fresh review
+  (`post-verdict.sh`), so nothing is lost and nothing is carried forward by hand.
+- **Write the review body to a path unique to this review** (`verdict-<pr>-<sha8>.md`, not a shared name) in the
+  OS temp directory or the checkout — `post-verdict.sh` refuses a body file anywhere else, including an agent
+  scratchpad. Concurrent reviewers share a scratch directory and one will post the other's body.
 - **Post the verdict, name the head SHA you reviewed, and stop.** Do not write to the board: the author owns
   `Review` and blocks on `scripts/watch-verdict.sh` ([engineering §10](../trading-platform-engineering.md);
   gh#815); the [coordinator](coordinator.md) watches `verdict:watching` (gh#1028). Card writes are not this
   hat. The SHA is how they tell which verdict a column is following.
+
+## Stay out of the shared checkout
+
+Sessions run in parallel and share one clone, so a reviewer who moves the working tree moves it under everyone.
+Review from the remote: `git fetch` is a read; resolve the head and base as `origin/…`, read the diff with
+`gh api repos/<owner>/<repo>/pulls/<n>/files` or `git diff --merge-base origin/<base> <head>`, and read a file at a
+revision with `git cat-file -p <rev>:<path>` (on Windows Git Bash use `MSYS_NO_PATHCONV=1`; the colon form breaks
+silently). If you must have a tree, make a throwaway worktree on a short path (`C:/tmp/rv-<pr>`; Windows path limits
+bite) and remove it when done.
+
+**Never** `git checkout <ref> -- .`, `git reset --hard`, `git stash` or `git clean` in a tree that is not your own,
+and never point a probe at a live stack or a real broker (R-14). If you did damage a shared tree, **stop and tell
+the maintainer** what you changed; do not repair it silently, because the repair is a second unreviewed edit.
 
 ## What you do not do
 
@@ -77,7 +99,10 @@ name and stays in `.github/` because GitHub's reviewer reads that exact path; th
   that it ships — and you approve a diff you *reviewed*, never one you *authored*.
 - **Write to the board.** Post the verdict and name the head SHA; the author owns `Review` and the coordinator
   watches the loop. Card writes are not this hat.
-- **Push commits to the branch under review**, unless asked to apply your own findings.
+- **Push commits to the branch under review.** Three reasons, and they are why this is a rule and not a courtesy:
+  the author never learns the pattern, you would be reviewing your own work, and the diff changes under the
+  verdict you are writing. The one exception is the operator asking you, in so many words, to apply your own
+  findings — and that is a **separate pass that posts no verdict**.
 - **Resolve your own threads.** The author resolves them once addressed.
 - **Redesign.** Review what was built against what it claims to do. If a different design would be better, ask;
   unless the design as built is unsafe, which is a finding.
@@ -133,8 +158,8 @@ them is optional:
   however much the parent would like you to.
 
 The prompt that carries these rules to a spawned reviewer is
-[`.github/reviewer-prompt-verdict.md`](../../.github/reviewer-prompt-verdict.md) (its substance shared with the
-advisory CI reviewer via `reviewer-prompt.md`). If you are re-spawned because an approval went **stale**, you are
+[`.github/reviewer-prompt-verdict.md`](../../.github/reviewer-prompt-verdict.md) (its substance is in
+`reviewer-prompt.md`). If you are re-spawned because an approval went **stale**, you are
 reviewing the current head afresh — the earlier approval is not a starting position you can defend.
 
 ### Ruling takes an identity, and not every session has one

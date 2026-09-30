@@ -26,6 +26,17 @@ Sizes below are approximate tokens, so you can see what a read costs before you 
 | [`AGENT-MEMORY.md`](AGENT-MEMORY.md) | 0.9K | **Before starting any work** — the catch-all for practices with no formal home. Cheap; just read it. |
 | [`integration-test-audit.md`](integration-test-audit.md) | 17.7K | You are writing integration tests and need the existing inventory. §2 is the inventory; live per-issue status is **the tracker**, not this file. |
 
+## Reference material — imported, not authoritative
+
+Copied from a sibling project as material to work from. **None of it describes this repo**; the authority for each
+is named in the file's own banner. Nothing routes an agent to follow them.
+
+| Document | ~tok | Read it when |
+|---|---:|---|
+| [`engineering-standards.md`](engineering-standards.md) | 26.5K | You want to see a complete engineering-standards document to adapt from. **Authority here is [`trading-platform-engineering.md`](trading-platform-engineering.md).** Numbered sections; open the one you need, not the file. |
+| [`examples/pr-workflow.md`](examples/pr-workflow.md) | 15.5K | You want an example of a mature change-to-`main` workflow (GitLab-era; MR = PR). **This repo's process is [`project-board-workflow.md`](project-board-workflow.md).** |
+| [`examples/pipeline-reproduction.md`](examples/pipeline-reproduction.md) | 11.5K | You want the **target shape** of the CI/CD pipeline this project is aiming for. **The real pipeline is `.github/workflows/`.** |
+
 ## Decisions — [`adr/`](adr/) (30 records, ~84K)
 
 **Never read the folder.** [`adr/README.md`](adr/README.md) indexes every record; open the one ADR you need.
@@ -39,11 +50,20 @@ read its Decision, then the update that matches your increment — not the whole
 Loaded **on demand by role**, not by directory. See the table at the top of the root
 [`AGENTS.md`](../AGENTS.md).
 
+Each has a Claude Code **skill** in [`.claude/skills/`](../.claude/skills/) that triggers on the work and then
+sends you here, and the reviewer also has a [**subagent**](../.claude/agents/code-reviewer.md) for the isolated
+context gh#815 needs. Those are pointers, not copies — the files below stay the only home, and they cost the same
+to read either way. Why they are shaped that way: [`agents/README.md`](agents/README.md).
+
 | Contract | ~tok | Read it when |
 |---|---:|---|
 | [`agents/code-reviewer.md`](agents/code-reviewer.md) | 3.4K | You are reviewing any change, anywhere. |
 | [`agents/platform.md`](agents/platform.md) | 1.9K | You are touching CI/CD, the image, compose or deploy. |
 | [`agents/coordinator.md`](agents/coordinator.md) | 3.3K | You are assigning work from the board, or driving a task to approval. Reviewer, Platform and Coordinator **never auto-load**. |
+| [`agents/doc-simplifier.md`](agents/doc-simplifier.md) | 10.2K | You are writing the short "front door" versions of the root documents from their full references. *Imported; not yet adapted to this repo.* |
+| [`agents/wiki-editor.md`](agents/wiki-editor.md) | 5.0K | A batch of changes has landed in the wiki and you are fixing what stopped being true. *Imported; not yet adapted to this repo.* |
+| [`agents/multi-agent.md`](agents/multi-agent.md) | 1.5K | More than one agent tool shares the board — one lead, the others until review. *Imported.* |
+| [`agents/task-sizing.md`](agents/task-sizing.md) | 1.6K | You are choosing the cheapest model that can finish a task, or estimating time to complete. A shared rubric, not a role. *Imported.* |
 
 The two subtree contracts — [`src/AGENTS.md`](../src/AGENTS.md) (Coding) and
 [`IntegrationTests/AGENTS.md`](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) (QA) — load from their

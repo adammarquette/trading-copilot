@@ -35,6 +35,11 @@ back to **Planning** saying what is missing, and it gets re-scored.
   applies **and** the takeover has been announced on the issue. A non-zero exit is a decline (claimed,
   closed, or a non-epic parent already claimed) — read the status, not only the prose
 
+**Demote, do not dispatch, and write the question down.** An item that needs a maintainer ruling goes to
+**Planning** with the open question as a bullet on the issue; a Planning item with no written question looks like
+one nobody read. An item waiting on another issue gets a `Blocked by #N` comment naming it (or a native
+dependency) — open questions are Planning, not blocked.
+
 **Pick order**, so two coordinator sessions do not thrash:
 
 1. Conflicted PR — re-dispatch the implementer on the **same** claim. Do not launch a reviewer
@@ -170,6 +175,36 @@ repo *mandates*. So a PR that is approved, green, unconflicted and up to date st
 approving review — not a defect, and not something a re-dispatched implementer can clear. Confirm the required
 checks are green with no unresolved threads, report it ready to merge, and stop.
 
+## Board sweep
+
+The board is manual and goes stale, so look for state that disagrees with itself. Read the PR and the branch
+before you touch a card — "no PR" has three causes and each moves the card somewhere different.
+
+- **`Review` with no open PR:** merged (→ `Done`), or closed unmerged / never opened. In the last two, do not
+  re-dispatch it as fresh work: say what you found on the issue and tell the maintainer, because the board
+  workflow sanctions no move out of `Review` other than to `Done`. Check `gh pr list --search <id>` first.
+- **`In Progress` with no claim branch** (`scripts/claim.sh <id> --check`) and no fresh claim from another tool:
+  the work is unclaimed. Note it on the issue and tell the maintainer; re-claim it through `claim.sh` rather than
+  moving the card, since the only sanctioned backward move is the kickback to **Planning**.
+- **A closed issue still in a work column:** move it to `Done`.
+- **A PR with no issue link:** read the body for a plain `Closes #N` / `Related to #N`. `closingIssuesReferences`
+  is empty for a correct `Related to`, so it cannot prove an orphan.
+- **More than one `work:*` or `Work Estimate` label** on an issue: a half-done edit; correct it and say so.
+- **Approved, green, no `verdict:watching`:** the author never handed on. Tell the maintainer; do not merge.
+
+## Hard stops
+
+Some situations are not yours to push through. **Stop, leave the card where it is, and escalate in a note on the
+issue and the PR** — do not move the column, because a moved card reads as progress:
+
+- the review loop reaches `watch-verdict.sh`'s round cap (**3** rounds, exit `5`) on one PR;
+- the **same finding survives a fix**;
+- you disagree with a reviewer's finding (say why; the maintainer decides);
+- a requirement changes under a task in flight;
+- the tracker or `gh` is unreachable, or `watch-verdict.sh` exits `2` (the wait timed out with nobody having ruled, or check state could not be read) —
+  that is a reason to look, never a reason to treat the PR as approved;
+- a `safety-critical` item has been scored below its floor.
+
 ## Merge conflicts
 
 A conflicted PR is not red CI and is not a missing reviewer. GitHub reports `CONFLICTING` / `dirty` and
@@ -201,10 +236,13 @@ finish the loop you started or take the label down as you leave; the command is 
 - **Invent a second stall threshold.**
 - **Pick Backlog or deferred `backlog` work** unless the issue says its trigger has fired.
 - **Guess a thin issue into existence.** Comment and skip — kickback is **Planning**.
+- **Tick acceptance-criteria boxes or hand an item on without checking the verdict addressed every criterion** —
+  met, not met or not verifiable, each with evidence. The reviewer's verdict is the record; you check it is
+  complete.
 
 ## Definition of done
 
 Every dispatched issue matched its hat and tier · in-flight work watched · stalls announced on the issue
 before takeover · remaining open PRs scanned into `develop` before a new `Current ToDo` · conflicted PRs
 re-dispatched, never reviewed · every mergeable `Review` PR has a reviewer on the current head or an
-author running the loop · a reviewer who has ruled is not the one who fixes · nothing merged.
+author running the loop · a reviewer who has ruled is not the one who fixes · the board swept for state that disagrees · nothing merged.
