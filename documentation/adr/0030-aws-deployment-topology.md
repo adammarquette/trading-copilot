@@ -185,6 +185,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 | 2026-09-13 | Project-scoped role names + imported (not created) OIDC provider — the shared account already had both (gh#1201) |
 | 2026-09-29 | **Withdrawn** — the AWS plan is dropped; Railway remains the running cloud (gh#1215) |
 | 2026-09-30 | The AWS deploy workflows and script are removed; `release.yml` keeps its approval gate and retag (gh#1232) |
+| 2026-09-30 | `infra/` (the CDK app) and its CI steps are removed, and `aws-production` leaves `scripts/bootstrap.sh` (gh#1232) |
 
 ## Update (2026-09-12) — OIDC roles and digest-only release/rollback workflows (gh#1187)
 
@@ -273,13 +274,32 @@ that step's first half; the Decision is still not rewritten.
   `GitHubOidcStackTests` reads `bootstrap.sh`, so those go together in the next step.
 - **Still true:** nothing deploys to Railway from CI yet; that is the step after (gh#1232).
 
+## Update (2026-09-30) — `infra/` and the `aws-production` plumbing are removed (gh#1232)
+
+The second half of the removal the previous Update named. The Decision is still not rewritten; everything above this
+Update describes a plan that no longer has code behind it.
+
+- **Removed:** `infra/` (the C# CDK app, `EnvironmentStack` and `GitHubOidcStack`, and its template tests) and the
+  `ci.yml` steps that restored, format-checked, built, tested and synthesised it; `aws-production` from
+  `scripts/bootstrap.sh`'s environment list, and that script's read of the Actions OIDC subject, which existed only
+  for the AWS deploy roles.
+- **Replaced:** `GitHubOidcStackTests` was the only check on `bootstrap.sh`'s environment list. It went with
+  `infra/`; `scripts/tests/bootstrap-environments.test.sh` now fails when `bootstrap.sh` creates more or fewer
+  environments than the workflows name, through `check-release-gate.sh --list`, the same discovery the live gate uses.
+- **Kept:** the `production` approval environment, which `release.yml`'s `gate` names, `bootstrap.sh` creates and
+  `check-release-gate.sh` vouches for live.
+- **Left for the operator (not doable in a PR):** delete the `aws-production` GitHub environment and the `AWS_*`
+  repository variables, and tear down whatever was applied in the shared AWS account; see the
+  [runbook](../deployment-runbook.md#aws-withdrawn-and-removed--history-only).
+- **Still true:** nothing deploys to Railway from CI yet; that is gh#1232's last step.
+
 ## Follow-ups
 
-- CDK app under `infra/` — landed with gh#1186.
-- OIDC roles + the release-triggered deploy workflow — landed with gh#1187. Not a merge-to-`main` deploy.
-  Its role-name and provider collisions with the shared account were fixed by gh#1201; the stack still has
-  not had a successful `cdk deploy`.
-- Operator inventory + staging Lookup — this increment (gh#1188). First apply still needs operator
-  `AlertsEmail` and secret-shell values; production hostname apply is later.
-- Dated **Update** on this record when Railway sunsets, after AWS staging has proven R-13 on practice (gh#1189).
-- Measure EFS vs. the EC2 + EBS escalation on staging if WAL/`fsync` cost shows up under a real session.
+*Closed by the withdrawal (gh#1215) and the removal (gh#1232); kept as the trail, none of them is open work.*
+
+- ~~CDK app under `infra/`~~ — landed with gh#1186; removed in gh#1232.
+- ~~OIDC roles + the release-triggered deploy workflow~~ — landed with gh#1187 (collisions fixed by gh#1201);
+  the workflows were removed in gh#1232 and the OIDC stack's code with `infra/`.
+- ~~Operator inventory + staging Lookup~~ (gh#1188) — closed as not planned with the withdrawal.
+- ~~Dated **Update** on this record when Railway sunsets~~ (gh#1189) — moot; Railway is the running cloud.
+- ~~Measure EFS vs. the EC2 + EBS escalation on staging~~ — moot.

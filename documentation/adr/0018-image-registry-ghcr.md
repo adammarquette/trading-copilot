@@ -77,6 +77,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 |---|---|
 | 2026-09-12 | AWS ECS pulls GHCR **by digest**; production AWS deploy is a release, not a merge ([ADR-0030](0030-aws-deployment-topology.md)) (gh#1185) |
 | 2026-09-12 | Release workflow retags the merge-published `:sha-<short>` as `:VERSION` and deploys that digest (gh#1187) |
+| 2026-09-30 | A release still retags but no longer deploys; the AWS consumer is gone (gh#1215, gh#1232) |
 
 ## Update (2026-09-12) — AWS pulls by digest; merge still publishes, it does not deploy AWS (gh#1185)
 
@@ -92,7 +93,15 @@ that parallel run lasts; it is not rewritten here.
 The *Decision* (build once on merge, tag by branch plus `:sha-<short>`) stands. The workflow child
 [ADR-0030](0030-aws-deployment-topology.md) named now lives: `release.yml` **retags** the merge-published
 `:sha-<short>` as `:VERSION` and deploys that digest — it does not rebuild, and it never references
-`:latest`. Railway still consumes the branch tag. Procedure: [runbook, AWS release / deploy](../deployment-runbook.md#aws-release--deploy-oidc).
+`:latest`. Railway still consumes the branch tag. (The deploy half was removed on 2026-09-30; see the next Update.)
+
+## Update (2026-09-30) — a release retags but no longer deploys (gh#1232)
+
+The *Decision* stands. With the AWS plan withdrawn ([ADR-0030](0030-aws-deployment-topology.md), gh#1215),
+`release.yml` keeps its human approval (`environment: production`) and the retag of the merge-published
+`:sha-<short>` as `:VERSION`, and its AWS deploy jobs are gone (gh#1232), so the digest consumer this record's
+2026-09-12 Updates describe no longer exists. Railway consumes the branch tag; a Railway deploy path is gh#1232's
+next step. Procedure: [runbook, release approval gate](../deployment-runbook.md#release-approval-gate-releaseyml).
 
 ## Follow-ups
 
@@ -105,4 +114,5 @@ The *Decision* (build once on merge, tag by branch plus `:sha-<short>`) stands. 
 - **Multi-service images.** The architecture is several services (ingestion, processor, execution, …); today
   only the BFF image exists. Each new service that ships as its own image extends this same publish job.
 - **AWS digest deploy** is [ADR-0030](0030-aws-deployment-topology.md)'s release trigger, not this record's
-  merge-to-branch publish. Landed with gh#1187 (`release.yml` retags `:sha-<short>` as `:VERSION`).
+  merge-to-branch publish. Landed with gh#1187 (`release.yml` retags `:sha-<short>` as `:VERSION`); the deploy
+  half was removed with the AWS plan (gh#1215, gh#1232) and the retag remains.

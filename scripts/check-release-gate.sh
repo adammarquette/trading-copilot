@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # check-release-gate.sh — fail when the release path's approval gate is inert.
 #
-#   scripts/check-release-gate.sh [workflows-dir]     (default: .github/workflows)
+#   scripts/check-release-gate.sh [workflows-dir]          (default: .github/workflows)
+#   scripts/check-release-gate.sh --list [workflows-dir]   print the discovered names, one per line; no API call
+#
+# --list exists so scripts/tests/bootstrap-environments.test.sh can hold scripts/bootstrap.sh's list to the
+# same discovery this gate uses, rather than to a second parser that could disagree with it (gh#1232).
 #
 # WHY THIS EXISTS (gh#1187)
 # `environment: production` does not create or require anything. If the environment does not
@@ -16,8 +20,8 @@
 # Discovery of no environment: key is a FAILURE (the gate was deleted, or this script no
 # longer matches how the workflows are written). A ${{ }} name is UNCHECKABLE.
 #
-# deploy.yml names a workflow_dispatch *input* `environment` — discovery starts at `jobs:`
-# so that input is not reported as a gate.
+# A workflow_dispatch *input* named `environment` is not a gate (the removed AWS deploy.yml had
+# one) — discovery starts at `jobs:` so such an input is not reported as one.
 
 set -euo pipefail
 
@@ -25,6 +29,11 @@ die() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
 ok() { printf '\033[32m%s\033[0m\n' "$*"; }
 
+LIST_ONLY=false
+if [ "${1:-}" = "--list" ]; then
+  LIST_ONLY=true
+  shift
+fi
 WORKFLOWS_DIR="${1:-.github/workflows}"
 
 # Discovery is a file read. Auth is required only for the API half below — a fixture
@@ -72,6 +81,13 @@ discovered="$(
     END { if (pending) close_pending() }
   ' "${workflow_files[@]}" | sort -u
 )"
+
+if $LIST_ONLY; then
+  # Names only, deduplicated. An unresolved mapping or a ${{ }} name is printed as found, so a caller
+  # comparing lists sees it rather than having it dropped.
+  [ -z "$discovered" ] || printf '%s\n' "$discovered" | cut -f2- | sort -u
+  exit 0
+fi
 
 if [ -z "$discovered" ]; then
   die "no \`environment:\` key found in any workflow under $WORKFLOWS_DIR.
