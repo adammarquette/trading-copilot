@@ -180,10 +180,12 @@ checks are green with no unresolved threads, report it ready to merge, and stop.
 The board is manual and goes stale, so look for state that disagrees with itself. Read the PR and the branch
 before you touch a card — "no PR" has three causes and each moves the card somewhere different.
 
-- **`Review` with no open PR:** merged (→ `Done`), closed unmerged, or never opened (→ **Planning**, not
-  `Current ToDo`; the work needs re-scoping, not re-dispatching). Check `gh pr list --search <id>` first.
-- **`In Progress` with no claim branch** (`scripts/claim.sh <id> --check`): back to `Current ToDo`, unless another
-  tool's claim is fresh.
+- **`Review` with no open PR:** merged (→ `Done`), or closed unmerged / never opened. In the last two, do not
+  re-dispatch it as fresh work: say what you found on the issue and tell the maintainer, because the board
+  workflow sanctions no move out of `Review` other than to `Done`. Check `gh pr list --search <id>` first.
+- **`In Progress` with no claim branch** (`scripts/claim.sh <id> --check`) and no fresh claim from another tool:
+  the work is unclaimed. Note it on the issue and tell the maintainer; re-claim it through `claim.sh` rather than
+  moving the card, since the only sanctioned backward move is the kickback to **Planning**.
 - **A closed issue still in a work column:** move it to `Done`.
 - **A PR with no issue link:** read the body for a plain `Closes #N` / `Related to #N`. `closingIssuesReferences`
   is empty for a correct `Related to`, so it cannot prove an orphan.
@@ -199,8 +201,8 @@ issue and the PR** — do not move the column, because a moved card reads as pro
 - the **same finding survives a fix**;
 - you disagree with a reviewer's finding (say why; the maintainer decides);
 - a requirement changes under a task in flight;
-- the tracker or `gh` is unreachable, or `watch-verdict.sh` times out with nobody having ruled (exit `2`) — that is a
-  reason to look, never a reason to treat the PR as approved;
+- the tracker or `gh` is unreachable, or `watch-verdict.sh` exits `2` (the wait timed out with nobody having ruled, or check state could not be read) —
+  that is a reason to look, never a reason to treat the PR as approved;
 - a `safety-critical` item has been scored below its floor.
 
 ## Merge conflicts

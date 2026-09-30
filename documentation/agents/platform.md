@@ -102,8 +102,9 @@ only a gate if something goes red for the reason it exists.
   file. A required job asserts a count above zero. Never `continue-on-error` on a required check, and a step under
   `if: always()` must not mask a failure. Read the job list of a real PR run rather than trusting the workflow
   file.
-- **New self-test suites declare how many assertions they expect**, so a dropped case cannot stay green. (The
-  existing `scripts/tests/` suites do not yet; do not retrofit silently — file it.)
+- **New self-test suites declare how many assertions they expect**, so a dropped case cannot stay green. (Only
+  `scripts/tests/reviewer-review-exchange.test.sh` does so far; the older suites do not yet — do not retrofit
+  silently, file it.)
 - **A deploy is not verified by a green apply and a healthy container.** Verify at the front door
   ([`scripts/verify-deploy.sh`](../../scripts/verify-deploy.sh)) and fail closed: a non-200, the wrong version or
   digest, or the R-13 watchdog not confirmed running is red, never silent. Which of those it covers today is

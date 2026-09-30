@@ -71,8 +71,9 @@ name and stays in `.github/` because GitHub's reviewer reads that exact path; th
 - **Re-read the head just before you post.** If it moved while you were reviewing, say so in the body and name
   both SHAs; the gate will mark an approval on a superseded head stale and the author will spawn a fresh review
   (`post-verdict.sh`), so nothing is lost and nothing is carried forward by hand.
-- **Write the review body to a path unique to this review** (`verdict-<pr>-<sha8>.md` in your scratch space, not a
-  shared name): concurrent reviewers share a scratch directory and one will post the other's body.
+- **Write the review body to a path unique to this review** (`verdict-<pr>-<sha8>.md`, not a shared name) in the
+  OS temp directory or the checkout — `post-verdict.sh` refuses a body file anywhere else, including an agent
+  scratchpad. Concurrent reviewers share a scratch directory and one will post the other's body.
 - **Post the verdict, name the head SHA you reviewed, and stop.** Do not write to the board: the author owns
   `Review` and blocks on `scripts/watch-verdict.sh` ([engineering §10](../trading-platform-engineering.md);
   gh#815); the [coordinator](coordinator.md) watches `verdict:watching` (gh#1028). Card writes are not this
@@ -84,7 +85,7 @@ Sessions run in parallel and share one clone, so a reviewer who moves the workin
 Review from the remote: `git fetch` is a read; resolve the head and base as `origin/…`, read the diff with
 `gh api repos/<owner>/<repo>/pulls/<n>/files` or `git diff --merge-base origin/<base> <head>`, and read a file at a
 revision with `git cat-file -p <rev>:<path>` (on Windows Git Bash use `MSYS_NO_PATHCONV=1`; the colon form breaks
-silently). If you must have a tree, make a throwaway worktree on a short path (`C:	mpv-<pr>`; Windows path limits
+silently). If you must have a tree, make a throwaway worktree on a short path (`C:/tmp/rv-<pr>`; Windows path limits
 bite) and remove it when done.
 
 **Never** `git checkout <ref> -- .`, `git reset --hard`, `git stash` or `git clean` in a tree that is not your own,
