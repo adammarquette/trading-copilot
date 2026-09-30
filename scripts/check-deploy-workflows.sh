@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
-# check-deploy-workflows.sh — fail when the AWS deploy path is the wrong shape.
+# check-deploy-workflows.sh — fail when the release workflow is the wrong shape.
 #
 #   scripts/check-deploy-workflows.sh [workflows-dir]     (default: .github/workflows)
 #
-# WHY THIS EXISTS (gh#1187, ADR-0030 decision 3 / 4 / 8 / 11)
+# WHY THIS EXISTS (gh#1187, gh#1232; ADR-0018, ADR-0030 decisions 3 / 11)
 #
-# Several of the ways a digest-deploy can be wrong are silent and green:
-#   * an unversioned {{resolve:ssm}} is *no changes* on an identical template;
-#   * aws ssm put-parameter over a CloudFormation-managed history parameter is drift;
-#   * environment: ${{ inputs.environment }} is a name check-release-gate.sh cannot vouch for;
-#   * environment: staging is a second manual approval on every release;
+# release.yml turns a published GitHub release into an immutable image tag, and several ways for that to be wrong
+# are silent and green:
+#   * environment: ${{ inputs.x }} is a name check-release-gate.sh cannot vouch for, so the human approval can be
+#     an inert gate that never asks;
+#   * a publish job that does not wait for the approval retags an image nobody approved;
 #   * :latest is whatever was tagged last;
-#   * a twelve-digit account id in an ARN is a secret-shaped literal in a public repository.
+#   * a publish job that rebuilds instead of retagging ships bytes CI never tested;
+#   * a publish job that exposes no digest gives whatever deploys next nothing to pin.
 #
-# This reads the workflow files. Shape from TopstepX check-deploy-workflows.sh; this product's
-# stack names and ADR citations are ours.
+# The workflow used to end in two AWS deploy jobs and be paired with deploy.yml; both went with the AWS plan
+# (gh#1215, gh#1232), and this checker went from asserting an AWS deploy path to asserting what remains: the
+# approval gate and the retag. A deploy job that follows a Railway deploy path gets its own assertions when it is
+# added. Shape from TopstepX check-deploy-workflows.sh; this product's job names are ours.
+#
+# It reads the workflow file and takes the directory as an argument so scripts/tests/check-deploy-workflows.test.sh
+# can run it against deliberately broken copies and prove each assertion goes red for the reason it exists.
 
 set -euo pipefail
 
@@ -26,7 +32,6 @@ WORKFLOWS_DIR="${1:-.github/workflows}"
 [ -d "$WORKFLOWS_DIR" ] || die "no such directory: $WORKFLOWS_DIR"
 
 RELEASE="$WORKFLOWS_DIR/release.yml"
-DEPLOY="$WORKFLOWS_DIR/deploy.yml"
 
 failed=0
 checked=0
@@ -114,19 +119,6 @@ job_environment_line() {
   '
 }
 
-require_no_environment() {
-  local file="$1" job="$2" line
-  checked=$((checked + 1))
-  line="$(job_environment_line "$file" "$job")"
-  if [ -n "$line" ]; then
-    fail "$file job '$job' declares an environment: $line
-  Staging is already behind the production approval on gate; a named environment is a second
-  manual approval, and loosening that gate is the inert-gate class check-release-gate.sh refuses."
-    return 0
-  fi
-  pass "no environment: on $file / $job"
-}
-
 require_literal_environment() {
   local file="$1" job="$2" expected="$3" line rest
   checked=$((checked + 1))
@@ -148,94 +140,35 @@ require_literal_environment() {
   esac
 }
 
-require_text() {
-  local file="$1" needle="$2" label="$3"
-  checked=$((checked + 1))
-  if grep -Fq -- "$needle" "$file"; then
-    pass "$label"
-  else
-    fail "$file never says: $needle  ($label)"
-  fi
-}
-
-refuse_account_arn() {
-  local file="$1"
-  checked=$((checked + 1))
-  if grep -E -n 'arn:aws:iam::[0-9]{12}:' "$file"; then
-    fail "$file contains a twelve-digit account-id ARN (public repository; use vars.AWS_ACCOUNT_ID)"
-  else
-    pass "no account-id ARN in $file"
-  fi
-}
-
-refuse_long_lived_key() {
-  local file="$1"
-  checked=$((checked + 1))
-  if grep -E -n 'AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|secrets\.AWS_' "$file"; then
-    fail "$file names a long-lived AWS key (ADR-0030 decision 4; use OIDC)"
-  else
-    pass "no long-lived AWS key in $file"
-  fi
-}
-
 if require_file "$RELEASE"; then
+  require_job "$RELEASE" "verify-gate"
+  require_job "$RELEASE" "gate"
   require_job "$RELEASE" "publish"
+
+  # The human approval: a literal environment that check-release-gate.sh can vouch for, ordered after the check
+  # that the environment is real, and in front of the retag.
+  require_in_job "$RELEASE" "gate" "needs: verify-gate" "gate waits for the check that the approval gate is real"
+  require_literal_environment "$RELEASE" "gate" "production"
+  require_in_job "$RELEASE" "publish" "needs: gate" "publish waits for the human approval"
+
+  # The retag: an immutable version tag pointing at the digest CI already built and tested.
+  require_in_job "$RELEASE" "publish" "imagetools create" "publish retags the published digest"
+  refuse_in_job "$RELEASE" "publish" "docker build " "publish never rebuilds (ADR-0018)"
+  refuse_in_job "$RELEASE" "publish" "build-push-action" "publish never rebuilds through an action"
+  refuse_in_job "$RELEASE" "publish" ":latest" "publish never references :latest"
+
+  # What whatever deploys next has to pin.
   require_in_job "$RELEASE" "publish" "digest:" "publish exposes the image digest as an output"
-  require_job "$RELEASE" "deploy-staging"
-  require_job "$RELEASE" "deploy-production"
-
-  require_in_job "$RELEASE" "deploy-staging" "needs: publish" "deploy-staging needs publish"
-  require_no_environment "$RELEASE" "deploy-staging"
-  require_in_job "$RELEASE" "deploy-staging" "id-token: write" "deploy-staging requests an OIDC token"
-  require_in_job "$RELEASE" "deploy-staging" "trading-copilot-GitHubDeploy-staging" "deploy-staging assumes trading-copilot-GitHubDeploy-staging"
-
-  require_in_job "$RELEASE" "deploy-production" "needs: deploy-staging" "deploy-production needs deploy-staging"
-  require_literal_environment "$RELEASE" "deploy-production" "aws-production"
-  require_in_job "$RELEASE" "deploy-production" "id-token: write" "deploy-production requests an OIDC token"
-  require_in_job "$RELEASE" "deploy-production" "trading-copilot-GitHubDeploy-production" "deploy-production assumes trading-copilot-GitHubDeploy-production"
-
-  for job in deploy-staging deploy-production; do
-    require_in_job "$RELEASE" "$job" "deploy-environment.sh" "$job runs the shared deploy script"
-    refuse_in_job "$RELEASE" "$job" ":latest" "$job never references :latest"
-    refuse_in_job "$RELEASE" "$job" "put-parameter" "$job never writes SSM"
-    refuse_in_job "$RELEASE" "$job" "resolve:ssm" "$job never uses {{resolve:ssm}}"
-  done
-  refuse_account_arn "$RELEASE"
-  refuse_long_lived_key "$RELEASE"
-fi
-
-if require_file "$DEPLOY"; then
-  require_text "$DEPLOY" "workflow_dispatch" "deploy.yml is workflow_dispatch"
-  require_text "$DEPLOY" "--ref main" "dispatch is documented as --ref main"
-  require_text "$DEPLOY" "type: choice" "environment input is a choice"
-  require_text "$DEPLOY" "imagetools inspect" "rollback resolves the digest from the version tag"
-
-  require_job "$DEPLOY" "deploy-staging"
-  require_job "$DEPLOY" "deploy-production"
-  require_in_job "$DEPLOY" "deploy-staging" "inputs.environment == 'staging'" "staging job is guarded by the staging choice"
-  require_in_job "$DEPLOY" "deploy-production" "inputs.environment == 'production'" "production job is guarded by the production choice"
-  require_no_environment "$DEPLOY" "deploy-staging"
-  require_literal_environment "$DEPLOY" "deploy-production" "aws-production"
-  require_in_job "$DEPLOY" "deploy-staging" "trading-copilot-GitHubDeploy-staging" "dispatch staging assumes trading-copilot-GitHubDeploy-staging"
-  require_in_job "$DEPLOY" "deploy-production" "trading-copilot-GitHubDeploy-production" "dispatch production assumes trading-copilot-GitHubDeploy-production"
-
-  for job in deploy-staging deploy-production; do
-    require_in_job "$DEPLOY" "$job" "deploy-environment.sh" "$job runs the shared deploy script"
-    refuse_in_job "$DEPLOY" "$job" ":latest" "$job never references :latest"
-    refuse_in_job "$DEPLOY" "$job" "put-parameter" "$job never writes SSM"
-    refuse_in_job "$DEPLOY" "$job" "resolve:ssm" "$job never uses {{resolve:ssm}}"
-  done
-  refuse_account_arn "$DEPLOY"
-  refuse_long_lived_key "$DEPLOY"
+  require_in_job "$RELEASE" "publish" "version:" "publish exposes the version as an output"
 fi
 
 info ""
 if [ "$failed" -gt 0 ]; then
-  die "$failed of $checked deploy-workflow assertion(s) failed.
+  die "$failed of $checked release-workflow assertion(s) failed.
 
-A digest that enters the stack through SSM, :latest, or an expression-named environment is a deploy that
-looks green and runs the wrong image — or that check-release-gate.sh cannot vouch for. Fix the workflow;
-do not delete the assertion to make this green."
+A release that skips its approval, rebuilds instead of retagging, or is named by an expression looks green and
+ships the wrong image — or is a gate that check-release-gate.sh cannot vouch for. Fix the workflow; do not delete
+the assertion to make this green."
 fi
 
-ok "ok  $checked deploy-workflow assertion(s) held under $WORKFLOWS_DIR."
+ok "ok  $checked release-workflow assertion(s) held under $WORKFLOWS_DIR."

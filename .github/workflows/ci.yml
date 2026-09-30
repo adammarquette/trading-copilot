@@ -124,22 +124,23 @@ jobs:
       - name: Watch-verdict check-read fallback (GraphQL down, REST up, gh#1040)
         run: ./scripts/tests/watch-verdict-check-read.test.sh
 
-      # gh#1187. The AWS deploy path is YAML plus a shell script: a :latest, an SSM write, a
-      # twelve-digit account ARN, or an expression-named environment is silent and green at
-      # synth time. These read the files (and fixture-red the scripts) so a PR cannot ship
-      # that shape. No AWS credentials. The live environment setting is check-release-gate.sh,
-      # which talks to the API — a missing `production` / `aws-production` is the inert-gate
-      # class; scripts/bootstrap.sh creates them.
-      - name: AWS deploy workflow shape
+      # gh#1187, gh#1232. release.yml turns a published release into an immutable image tag, and its
+      # failure modes are silent and green: an approval that is an expression-named environment, a publish
+      # job that skips the approval, rebuilds instead of retagging, or references :latest. The checker reads the
+      # workflow file; its own test runs it against deliberately broken copies so it cannot rot into a gate that
+      # passes everything. No credentials. The live environment setting is check-release-gate.sh, which talks to
+      # the API — a missing `production` / `aws-production` is the inert-gate class; scripts/bootstrap.sh
+      # creates them.
+      - name: Release workflow shape
         run: ./scripts/check-deploy-workflows.sh
+
+      - name: Release workflow shape (the checker goes red for each broken copy)
+        run: ./scripts/tests/check-deploy-workflows.test.sh
 
       - name: Release-gate discovery (fixtures)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/check-release-gate-selftest.sh
-
-      - name: Deploy-environment script (fixtures)
-        run: ./scripts/deploy-environment-selftest.sh
 
       - name: Image reference (lowercase)
         run: ./scripts/tests/image-reference.test.sh
