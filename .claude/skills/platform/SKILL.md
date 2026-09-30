@@ -1,6 +1,6 @@
 ---
 name: platform
-description: Take the Platform Agent hat in this repository — CI/CD workflows, the Dockerfile and container image, the compose stacks, `infra/`, the deployment runbook, registry and release gates. Use when editing anything under `.github/workflows/`, debugging a red or cancelled pipeline, changing how the app is built, shipped, deployed or rolled back, or comparing hosting platforms. Do not touch the pipeline or the runtime without it.
+description: Take the Platform Agent hat in this repository — CI/CD workflows, the Dockerfile and container image, the compose stacks, the deployment runbook, registry and release gates. Use when editing anything under `.github/workflows/`, debugging a red or cancelled pipeline, changing how the app is built, shipped, deployed or rolled back, or comparing hosting platforms. Do not touch the pipeline or the runtime without it.
 ---
 
 # Platform Agent

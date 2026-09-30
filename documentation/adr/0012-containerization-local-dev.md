@@ -46,6 +46,7 @@ mirrors the `## Update` headings, so keep the two in step when an entry is appen
 | Date | Update |
 |---|---|
 | 2026-09-12 | AWS is a second cloud consumer of the same GHCR image ([ADR-0030](0030-aws-deployment-topology.md)) (gh#1185) |
+| 2026-09-30 | The AWS consumer is withdrawn and its code removed; Railway is the only cloud consumer (gh#1215, gh#1232) |
 
 ## Update (2026-09-12) — AWS consumes the same artifact; compose stays local (gh#1185)
 
@@ -54,6 +55,12 @@ The *Decision* (containerize, `docker compose up`, config-driven DB, no secrets 
 compose already pulls: two AWS environments (staging + production); **`develop` stays this compose**. Railway
 remains a parallel consumer until ADR-0030's sunset Update. "Local ≡ cloud" stays "the same GHCR artifact,"
 not "Railway is the only cloud."
+
+## Update (2026-09-30) — the AWS consumer is withdrawn and removed (gh#1215, gh#1232)
+
+The *Decision* stands and the 2026-09-12 Update above is kept as history. The AWS consumer it named was
+withdrawn ([ADR-0030](0030-aws-deployment-topology.md), gh#1215) and its CDK app and deploy workflows were removed
+(gh#1232). Railway is the only cloud consumer of the GHCR image; "local ≡ cloud" means the same artifact there.
 
 ## Follow-ups
 - Author the app **`Dockerfile`** (multi-stage sdk → aspnet, binds `$PORT`) and wire the `app` service in compose once

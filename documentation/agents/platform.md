@@ -10,7 +10,7 @@ as `.github/workflows/`.
 | Container image (the **same** artifact local and deployed) | [`Api/Dockerfile`](../../src/MarqSpec.TradingCopilot.Api/Dockerfile), build context = repo root |
 | Image registry — built once in CI, pulled by local + Railway (AWS by digest was planned and withdrawn, [ADR-0030](../adr/0030-aws-deployment-topology.md)) | `ghcr.io/adammarquette/trading-copilot` (public) |
 | Local stack — pull (default) / dev-build override | [`docker-compose.yml`](../../docker-compose.yml), [`docker-compose.dev.yml`](../../docker-compose.dev.yml) |
-| AWS environment stacks — **withdrawn 2026-09-29 (gh#1215)**; code kept until its removal is decided | [`infra/`](../../infra/) |
+| Release approval environment (`production`) — created by the script, vouched for live by the gate, list held to the workflows by the test | [`bootstrap.sh`](../../scripts/bootstrap.sh), [`check-release-gate.sh`](../../scripts/check-release-gate.sh), [`bootstrap-environments.test.sh`](../../scripts/tests/bootstrap-environments.test.sh) |
 | Deploy resources, procedures, rulesets | [`deployment-runbook.md`](../deployment-runbook.md) |
 | Deployment decisions | [ADR-0012](../adr/0012-containerization-local-dev.md), [ADR-0018](../adr/0018-image-registry-ghcr.md), [ADR-0015](../adr/0015-distribution-licensing-governance.md), [ADR-0030](../adr/0030-aws-deployment-topology.md) (AWS topology, withdrawn 2026-09-29, gh#1215) |
 
