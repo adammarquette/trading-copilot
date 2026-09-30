@@ -16,8 +16,8 @@ cloud environments still need creating, so nothing deploys today.
 | Section | Read it when |
 |---|---|
 | [Platform](#platform) | you need the Railway project, the GHCR image, or the database shape |
-| [AWS environment stack](#aws-environment-stack) | you need the resources the `infra/` app creates, the staging inventory, or how to tell staging is up |
-| [AWS release / deploy (OIDC)](#aws-release--deploy-oidc) | you need the GitHub OIDC roles, the release/rollback workflows, or `scripts/bootstrap.sh` |
+| [AWS environment stack](#aws-environment-stack) — **withdrawn, history only (gh#1215)** | you need the resources the `infra/` app creates, the staging inventory, or how to tell staging is up |
+| [AWS release / deploy (OIDC)](#aws-release--deploy-oidc) — **withdrawn, history only (gh#1215)** | you need the GitHub OIDC roles, the release/rollback workflows, or `scripts/bootstrap.sh` |
 | [Local development (docker-compose)](#local-development-docker-compose) | standing the stack up on your machine |
 | [Environments ↔ branches](#environments--branches) | working out which branch deploys where |
 | [Secrets & config (per environment)](#secrets--config-per-environment) | a variable is missing or wrong — also [operator password recovery](#operator-password-recovery-r-18-adr-0017-operator-lifecycle) |
@@ -35,9 +35,10 @@ cloud environments still need creating, so nothing deploys today.
 ## Platform
 - **Cloud (running):** [Railway](https://railway.com) — project **`soothing-illumination`**
   (`2601eb74-b5f9-411f-bb9a-0cd19e6fd540`).
-- **Cloud (intended):** AWS — ECS Fargate + ALB, two environments (staging + production), GHCR by digest
-  ([ADR-0030](adr/0030-aws-deployment-topology.md)). This runbook still describes the running Railway cloud.
-  The CDK app is under [`infra/`](../infra/) (gh#1186 / gh#1188); see [AWS environment stack](#aws-environment-stack).
+- **Cloud (AWS — withdrawn 2026-09-29, gh#1215):** the AWS plan ([ADR-0030](adr/0030-aws-deployment-topology.md)) is
+  dropped; **Railway is the running cloud** and this runbook describes it. The AWS sections below are kept as
+  history and are not a procedure to follow. The CDK app is still under [`infra/`](../infra/) until its removal is
+  decided; see [AWS environment stack](#aws-environment-stack).
   Operator inventory (2026-09-12, gh#1188 — do not invent others): account `045296582762`, region `us-east-1`,
   staging hostname `trading-copilot.staging.marqspec.com`. GitHub OIDC deploy roles and the release/rollback
   workflows landed with **gh#1187**; see [AWS release / deploy](#aws-release--deploy-oidc). Production
@@ -54,8 +55,11 @@ cloud environments still need creating, so nothing deploys today.
 
 ## AWS environment stack
 
-The C# CDK app under [`infra/`](../infra/) (gh#1186 / gh#1188) matches [ADR-0030](adr/0030-aws-deployment-topology.md).
-Railway remains the **running** cloud until that record's sunset (gh#1189). GitHub OIDC deploy roles and the
+> **Withdrawn (2026-09-29, gh#1215).** The AWS plan is dropped and Railway is the running cloud. This section and
+> *AWS release / deploy* below are kept as history; do not run them as a procedure.
+
+The C# CDK app under [`infra/`](../infra/) (gh#1186 / gh#1188) matched [ADR-0030](adr/0030-aws-deployment-topology.md).
+Railway remained the **running** cloud throughout. GitHub OIDC deploy roles and the
 release workflow are [below](#aws-release--deploy-oidc) (gh#1187).
 
 ### Operator inventory (2026-09-12, gh#1188)
@@ -204,6 +208,8 @@ npx cdk synth --no-lookups -c outbound=NatGateway
 ```
 
 ## AWS release / deploy (OIDC)
+
+> **Withdrawn (2026-09-29, gh#1215).** History only; see the note under *AWS environment stack*.
 
 The OIDC stack and the release/rollback workflows (gh#1187) match [ADR-0030](adr/0030-aws-deployment-topology.md)
 decisions 4, 8 and 11. Shape is TopstepX `GitHubOidcStack` + `release.yml` / `deploy.yml` in
@@ -1086,7 +1092,7 @@ would otherwise page every day.
 - **Non-prod (dev / staging):** automatic on merge — CI builds + deploys **Railway** (the running cloud).
 - **Production (Railway):** **human-approved** (§9). Promote `staging → main`; CI deploys; smoke tests verify. A person must be
   aware of and approve any production deploy.
-- **AWS staging:** first apply is [How to deploy staging](#how-to-deploy-staging) (gh#1188). After OIDC exists, a
+- **AWS staging (withdrawn, gh#1215 — history only):** first apply is [How to deploy staging](#how-to-deploy-staging) (gh#1188). After OIDC exists, a
   published GitHub Release retags the merge-published digest and deploys it to staging, then the same digest to
   production behind the `aws-production` reviewer rule ([AWS release / deploy](#aws-release--deploy-oidc),
   [ADR-0030](adr/0030-aws-deployment-topology.md)). Do not cut a release expecting production to move — that is
@@ -1097,11 +1103,11 @@ would otherwise page every day.
 - Triggered by a **failed production smoke test** or an operator decision.
 - **Human-approved** (§9): roll back via Railway (redeploy the previous release) and confirm with smoke tests. Any
   rollback is an explicit, approved action — never automatic.
-- **AWS rollback** (once applied): `gh workflow run deploy.yml --ref main -f version=<previous> -f environment=staging`
+- **AWS rollback** (withdrawn, gh#1215 — history only): `gh workflow run deploy.yml --ref main -f version=<previous> -f environment=staging`
   (or `production`, which waits on `aws-production`). Never `:latest`. See [AWS release / deploy](#aws-release--deploy-oidc).
 
 ## Verification / smoke tests
-**AWS staging health (gh#1188):** `https://trading-copilot.staging.marqspec.com/health` must return 200 after
+**AWS staging health (withdrawn, gh#1215 — history only; gh#1188):** `https://trading-copilot.staging.marqspec.com/health` was to return 200 after
 the first apply. See [How to tell staging is up](#how-to-tell-staging-is-up).
 
 Post-deploy, the tagged **smoke** subset (engineering §5) confirms the critical paths. **The set exists**
