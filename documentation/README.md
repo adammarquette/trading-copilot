@@ -60,12 +60,6 @@ Loaded **on demand by role**, not by directory. See the table at the top of the 
 | [`agents/multi-agent.md`](agents/multi-agent.md) | 1.5K | More than one agent tool shares the board — one lead, the others until review. *Imported.* |
 | [`agents/task-sizing.md`](agents/task-sizing.md) | 1.6K | You are choosing the cheapest model that can finish a task, or estimating time to complete. A shared rubric, not a role. *Imported.* |
 
-**Imported reference set — [`agents/imported/`](agents/imported/).** Generic versions of `README`,
-`code-reviewer`, `coordinator` and `platform` that collide by name with this repo's tailored contracts above.
-They are **not contracts here**: nothing routes to them and they must not be followed as such. They are there to
-be diffed against the tailored versions and merged from. Sizes: `README` 4.1K, `code-reviewer` 9.6K,
-`coordinator` 13.4K, `platform` 10.2K.
-
 The two subtree contracts — [`src/AGENTS.md`](../src/AGENTS.md) (Coding) and
 [`IntegrationTests/AGENTS.md`](../src/MarqSpec.TradingCopilot.IntegrationTests/AGENTS.md) (QA) — load from their
 directory instead.

@@ -81,6 +81,40 @@ Six constraints that bite in CI:
 
 **A local check that disagrees with CI is worse than no local check.** When they diverge, fix the divergence.
 
+## Gates that cannot silently stop gating
+
+Every guard fails permissive when it breaks, and a permissive guard looks exactly like a passing one. So a gate is
+only a gate if something goes red for the reason it exists.
+
+- **A gate asserted in a comment is not a gate.** Each guard has a self-test that reddens when the guard is
+  broken. Mutate it both ways: break it (must go red), leave it (must stay green), and widen it (must go red).
+- **Assertions that cannot fail** are the usual hole: re-reading a variable the code just set, an earlier arm
+  refusing first so the arm under test never runs, printing instead of asserting, or accepting exit `0` as a
+  refusal. After you write one, break the guard a *second* way — a spelling variant, a different flag — and see
+  that it still reddens.
+- **Assert the exit status and the success line.** The absence of a `FAIL` line is not a pass; a script that did
+  nothing looks like one. Check the subject is a program before trusting a refusal (`bash -n`), and that a
+  refusal's exit code is not the shell's own (`2` is misuse).
+- **`… | grep -q` under `pipefail`.** `grep -q` exits on the first match, the writer gets `SIGPIPE`, and the
+  pipeline reads `141`: a match reads as *no match*. Use a here-string or `grep -c`, and treat a missing count as
+  undecidable, never as a pass.
+- **A test job can go green having run nothing** — zero tests discovered, a filter that matches none, no results
+  file. A required job asserts a count above zero. Never `continue-on-error` on a required check, and a step under
+  `if: always()` must not mask a failure. Read the job list of a real PR run rather than trusting the workflow
+  file.
+- **New self-test suites declare how many assertions they expect**, so a dropped case cannot stay green. (Only
+  `scripts/tests/reviewer-review-exchange.test.sh` does so far; the older suites do not yet — do not retrofit
+  silently, file it.)
+- **A deploy is not verified by a green apply and a healthy container.** Verify at the front door
+  ([`scripts/verify-deploy.sh`](../../scripts/verify-deploy.sh)) and fail closed: a non-200, the wrong version or
+  digest, or the R-13 watchdog not confirmed running is red, never silent. Which of those it covers today is
+  part of the job to check, not to assume.
+- **A deploy that could replace or drop the data volume**, the TimescaleDB / pgvector extensions or run a
+  destructive migration must refuse when it cannot verify what it is about to do. No such guard exists yet.
+
+**Merged is not live.** A merge publishes an image; production moves only by the human-approved step. Say which
+one you mean.
+
 ## Choosing a target platform
 
 Railway is where this runs today (ADR-0012). When a move is on the table the job is a **recommendation with

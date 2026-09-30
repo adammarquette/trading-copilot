@@ -74,6 +74,18 @@ Worth flagging specifically:
 - A new guard or refusal path with no test asserting **the venue is never called**.
 - A new branch in price or quantity selection with no test asserting the **exact** values transmitted.
 - A fake that doesn't configure the identity a new guard now reads — it will pass or fail for the wrong reason.
+- **A weakened test is a blocking finding.** A loosened assertion (`Be(x)` becoming `NotBeNull`), an edited expected
+  value, a deleted or skipped `[Fact]`, a swallowed throw, or an assertion moved below an early return. It is
+  legitimate only when the requirement (`R-#`) changed or the test became *stricter*. On a risk path a test that
+  quietly stops asserting is how a fail-open guard stays green forever.
+- **A new guard, refusal arm, risk-gate check or flatten branch with no red-proof.** The PR should show that
+  removing or inverting the guard fails a named test, and that widening an allow-list fails one. Re-run the
+  mutation you doubt yourself; check that it actually landed and that the test that went red is the one meant to.
+- **A test whose name promises more than its assertion can detect** — "never sends" that only asserts no throw, or
+  a bare substring match. Assert the **exact** quantity, price and account id transmitted, not just that
+  something was sent.
+- **Test-first is checkable, so check it:** the test appears before or beside the code it drives in the history or
+  the diff. "Tests were added" after the fact is not the same claim.
 - **Telemetry completeness (once the §7 observability stack is wired):** A new feature, pipeline step, or guard pathway with no OpenTelemetry metrics counter/gauge or trace context propagation (`trace_id` span links across event log boundaries).
 
 ## Documentation & PR Traceability are part of the change
