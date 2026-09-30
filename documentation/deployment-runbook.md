@@ -60,8 +60,9 @@ cloud environments still need creating, so nothing deploys today.
 
 A second Railway project, created 2026-09-29, holds the staging deploy that replaces the withdrawn AWS plan
 ([ADR-0030](adr/0030-aws-deployment-topology.md), gh#1215). Its `staging` environment is **practice-only** (R-14):
-`ASPNETCORE_ENVIRONMENT=Staging` maps through `DeploymentEnvironmentMapping`, where only the exact name
-`Production` unlocks live accounts and an unrecognised name fails closed to practice-only.
+`ASPNETCORE_ENVIRONMENT=Staging` maps through `DeploymentEnvironmentMapping`, where only `Production` (matched
+case-insensitively, so `production` is production too) unlocks live accounts and an unrecognised name fails closed
+to practice-only.
 
 | Item | Id / value |
 | --- | --- |
@@ -114,7 +115,7 @@ up-to-date" against the image's library; harmless until an `ALTER EXTENSION time
 
 **Not decided here:** a CI deploy hook (`RAILWAY_DEPLOY_HOOK_STAGING`) for this project — until one exists, a new
 image is deployed by changing the `app` image tag by hand. The older `soothing-illumination` project, which the
-sections above still describe, is untouched.
+sections below still describe, is untouched.
 
 ## AWS environment stack
 
