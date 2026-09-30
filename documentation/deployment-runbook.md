@@ -1024,8 +1024,13 @@ What to expect:
 - **A half-set or malformed value stops the boot**, naming the key (never the value): a bot token without the user
   id (or the reverse), a non-numeric user id, or a webhook that is not an `https://discord.com/api/webhooks/…` URL.
 - **A `429` is throttling, not an outage.** The log line says *rate-limited* with Discord's `Retry-After`; the
-  notification is **not** recorded as told, so the outbox re-offers it. A `5xx` or a timeout reads differently —
-  *rejected with 500* / *timed out*.
+  notification is **not** recorded as told for Discord, so the **next escalation re-emission** of the same incident
+  re-sends it (the auto-flatten and its watchdog re-emit every ~15–20 s). The outbox does **not** re-offer it — the
+  relay already stamped the row delivered when the queue accepted it — so a one-shot advisory that Discord throttled
+  is not retried. A `5xx` reads differently (*rejected with 500*), and a Discord that does not answer within its
+  5 s total deadline is logged as *exceeded its deadline* and abandoned so it cannot hold the notification pump.
+- **When both destinations (webhook and DM) are set, a DM failure after a webhook success is not retried by
+  itself**: the send reports accepted if either took it. Known limitation; Pushover is unaffected.
 - **Each transport dedups on its own**, so a Discord failure never suppresses a Pushover page and a Pushover
   success never hides a Discord failure; a repeated incident is still reported once per transport.
 

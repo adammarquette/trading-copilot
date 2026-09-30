@@ -25,7 +25,8 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// Two destinations, chosen by which options are set: a <b>webhook</b> posts to a channel, and a <b>bot token
 /// plus the operator's user id</b> opens a DM to that one pinned recipient and posts into it. Both configured
 /// means both. <see cref="SendAsync"/> reports accepted when <i>either</i> took it, because the operator can see
-/// it somewhere, and failing the whole send would have the relay re-post into the destination that worked.
+/// it somewhere. The known cost: a DM failure after a webhook success is not retried by itself, because the lane's
+/// dedup memory then records the incident as told.
 /// </para>
 /// <para>
 /// Failure-tolerant by construction, like every transport behind the seam: a fault returns

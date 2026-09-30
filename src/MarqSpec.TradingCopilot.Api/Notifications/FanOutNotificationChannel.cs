@@ -20,8 +20,10 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// transport suppressing the operator's next outage.
 /// </para>
 /// <para>
-/// Lanes run concurrently, so a slow Discord never delays a Pushover page. Each lane is failure-tolerant and never
-/// throws, apart from a genuine caller cancellation, which propagates.
+/// Lanes run concurrently, so the Pushover send is never gated on Discord. This awaits every lane, though, so the
+/// single-reader pump waits for the SLOWEST one: the Discord lane is wrapped in <see cref="BoundedNotificationChannel"/>
+/// so that wait is capped. Each lane is failure-tolerant and never throws, apart from a genuine caller
+/// cancellation, which propagates.
 /// </para>
 /// </remarks>
 public sealed class FanOutNotificationChannel : INotificationChannel, IIncidentKeyRegistry

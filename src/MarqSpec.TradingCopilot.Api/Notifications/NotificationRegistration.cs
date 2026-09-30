@@ -17,6 +17,11 @@ namespace MarqSpec.TradingCopilot.Api.Notifications;
 /// </remarks>
 public static class NotificationRegistration
 {
+    // The TOTAL time the pump waits for the Discord lane -- all of its calls together. Well under the ~30 s the three
+    // sequential 10 s calls could take, long enough for a healthy Discord (a call is normally well under a second).
+    // A named constant, not an env knob: nothing about it is an operator decision.
+    private static readonly TimeSpan _discordLaneDeadline = TimeSpan.FromSeconds(5);
+
     /// <summary>Adds the notification chain and the pump that drains it.</summary>
     /// <param name="builder">The host builder.</param>
     /// <returns>The builder, for chaining.</returns>
@@ -84,7 +89,14 @@ public static class NotificationRegistration
             ILogger discordLog = provider.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(NotificationRegistration).FullName!);
             if (discordConfigured)
             {
-                transports.Add(provider.GetRequiredService<DiscordNotificationChannel>());
+                // Bounded (gh#1157): the pump is a single reader and the fan-out awaits every lane, and Discord can
+                // make three sequential calls of up to 10 s each. This caps what the pump waits for it; Pushover is
+                // never wrapped, so its send is never gated on Discord.
+                transports.Add(new BoundedNotificationChannel(
+                    provider.GetRequiredService<DiscordNotificationChannel>(),
+                    "Discord",
+                    _discordLaneDeadline,
+                    provider.GetRequiredService<ILogger<BoundedNotificationChannel>>()));
                 discordLog.LogInformation("Discord notifications enabled; advisories are also published there (publish-only).");
             }
             else
