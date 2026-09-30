@@ -104,8 +104,12 @@ public class DiscordNotificationRegistrationTests
     {
         using WebApplication app = Compose(_webhookConfig);
 
-        TransportBeneathDedup(app.Services.GetRequiredService<QueuedNotificationChannel>())
-            .Should().BeOfType<DiscordNotificationChannel>("Discord rides the SAME queue -> dedup chain, not a parallel path");
+        object transport = TransportBeneathDedup(app.Services.GetRequiredService<QueuedNotificationChannel>());
+
+        transport.Should().BeOfType<BoundedNotificationChannel>("Discord rides the SAME queue -> dedup chain, under a bound");
+        Field(transport, "_inner").Should().BeOfType<DiscordNotificationChannel>();
+        Field(transport, "_deadline").Should().Be(TimeSpan.FromSeconds(5),
+            "a slow Discord must not hold the single-reader pump for the sum of its calls");
     }
 
     [Fact]
@@ -127,7 +131,9 @@ public class DiscordNotificationRegistrationTests
         FanOutNotificationChannel fanOut = InnerOf(queue).Should().BeOfType<FanOutNotificationChannel>().Subject;
 
         Lanes(fanOut).Select(lane => Field(lane, "_inner").GetType()).Should().Equal(
-            typeof(PushoverNotificationChannel), typeof(DiscordNotificationChannel));
+            typeof(PushoverNotificationChannel), typeof(BoundedNotificationChannel));
+        Field(Field(Lanes(fanOut)[1], "_inner"), "_inner").Should().BeOfType<DiscordNotificationChannel>(
+            "only the non-primary lane is bounded; Pushover is never wrapped");
         Field(queue, "_incidents").Should().BeSameAs(fanOut,
             "the queue's out-of-band key release must reach the SAME lanes the suppression reads (gh#1077)");
     }
